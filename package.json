@@ -1,0 +1,68 @@
+{
+  "name": "opencode-subagent-intervene",
+  "version": "1.0.0",
+  "description": "OpenCode plugin to stop, steer, and monitor subagents: cancel background subagents, send running ones new instructions, list what's running, and get told when one is stuck on a permission prompt",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "subagent",
+    "subagents",
+    "background-subagents",
+    "cancel",
+    "stop",
+    "steer",
+    "agent-orchestration",
+    "multi-agent",
+    "ai-agents",
+    "coding-agent",
+    "llm"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/rmk40/opencode-subagent-intervene#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rmk40/opencode-subagent-intervene.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rmk40/opencode-subagent-intervene/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "opencode": ">=2.2.0 <3"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun --external @opencode/plugin --external effect",
+    "typecheck": "tsc --noEmit",
+    "typecheck:e2e": "tsc --noEmit -p test/e2e/tsconfig.json",
+    "test": "bun test test/unit",
+    "probe": "bun test/e2e/run.ts",
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.2.0",
+    "effect": "^4.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    },
+    "effect": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@opencode/client": "2.2.0",
+    "@opencode/plugin": "2.2.0",
+    "@types/bun": "1.4.4",
+    "effect": "4.0.1",
+    "opencode-drive": "2.4.0",
+    "typescript": "7.0.2"
+  }
+}

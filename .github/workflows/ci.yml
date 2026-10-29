@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run typecheck:e2e
+      - run: bun run test
+      - run: bun run build
+      - name: Package contents
+        run: npm pack --dry-run
+
+  e2e:
+    # The scenarios drive a sandboxed OpenCode with its own config, data, and database.
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: npm install --global @opencode/cli@2.2.0
+      - run: bun run build
+      - name: Smoke test
+        run: bun run probe ./test/e2e/smoke.ts
+      - name: Scenarios
+        run: |
+          status=0
+          for scenario in test/e2e/scenarios/*.ts; do
+            echo "::group::$scenario"
+            bun run probe "./$scenario" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
