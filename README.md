@@ -1,6 +1,7 @@
 # opencode-subagent-intervene
 
 [![npm](https://img.shields.io/npm/v/opencode-subagent-intervene)](https://www.npmjs.com/package/opencode-subagent-intervene)
+[![CI](https://github.com/rmk40/opencode-subagent-intervene/actions/workflows/ci.yml/badge.svg)](https://github.com/rmk40/opencode-subagent-intervene/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/rmk40/opencode-subagent-intervene)](LICENSE)
 [![OpenCode 2.2+](https://img.shields.io/badge/OpenCode-2.2%2B-black)](https://opencode.ai/v2/docs/)
 
@@ -418,6 +419,11 @@ database. They need Bun 1.3.14 or later and `opencode2` on your `PATH`:
 bun run build
 bun run probe ./test/e2e/smoke.ts
 ```
+
+To release, start from a clean working tree, run `npm version patch -m "chore(release): %s"` (or
+`minor`, `major`), and `git push --follow-tags`. The tag starts the Release workflow, which publishes
+to npm with provenance and creates the GitHub Release. A version with a prerelease suffix, such as
+`1.1.0-beta.1`, goes to npm's `next` tag and is marked as a prerelease on GitHub.
 
 ## License
 
