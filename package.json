@@ -1,6 +1,6 @@
 {
   "name": "opencode-subagent-intervene",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OpenCode plugin to stop, steer, and monitor subagents: cancel background subagents, send running ones new instructions, list what's running, and get told when one is stuck on a permission prompt",
   "keywords": [
     "opencode",
