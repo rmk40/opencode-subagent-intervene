@@ -1,8 +1,10 @@
 // With `experimental.subagent_depth: 2`, a background child launches a background grandchild,
 // and both hold shells. subagent_stop on the child stops both, deepest first. The grandchild waits
-// on sixty shells at once, so its stopped run winds down after the child's, and its cancelled
-// notice wakes the already stopped child. The child stays stopped: the run the notice starts is
-// interrupted at once, nothing is persisted, and the parent hears only about the child.
+// on a hundred shells at once, so its stopped run usually winds down after the child's, and its
+// cancelled notice wakes the already stopped child; the run it starts is interrupted at once. When
+// the notice instead lands while the child's run is still stopping, the stop's interrupt clears the
+// wake and no new run starts. Either way the child stays stopped, nothing is persisted, and the
+// parent hears only about the child; the evidence records which order happened.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Option, Stream } from "effect";
@@ -35,7 +37,7 @@ import {
 const dir = runDir("stop-grandchild");
 const REASON = "the whole branch is wrong";
 /** Shells the grandchild waits on; each one adds to its stopped run's cleanup. */
-const GC_HOLDS = Array.from({ length: 60 }, (_, i) => `g_hold_${i}`);
+const GC_HOLDS = Array.from({ length: 100 }, (_, i) => `g_hold_${i}`);
 
 if (!existsSync(join(REPO_ROOT, "dist", "index.js")))
   throw new Error("dist/index.js is missing; run `bun run build` first");
@@ -213,6 +215,8 @@ export default OpenCodeDriver.use(
           e.type === "session.step.ended" &&
           e.at >= stopAt,
       );
+      const noticeAfterChildStopped =
+        childStoppedAt !== undefined && gcNotice.at >= childStoppedAt;
       const lineFor = (id: string) =>
         stopText.split("\n").find((line) => line.startsWith(`- ${id}`));
       const parentNotices = notices(dir, parent).filter((n) => n.at >= stopAt);
@@ -237,6 +241,9 @@ export default OpenCodeDriver.use(
         grandchildNotice: {
           t: gcNotice.at - stopAt,
           metadata: gcNotice.metadata,
+          order: noticeAfterChildStopped
+            ? "after the child stopped"
+            : "while the child was stopping",
           afterChildStoppedMs:
             childStoppedAt === undefined ? null : gcNotice.at - childStoppedAt,
         },
@@ -264,9 +271,11 @@ export default OpenCodeDriver.use(
         bothInterrupted:
           childInfo.outcome === "interrupted" &&
           gcInfo.outcome === "interrupted",
-        noticeAfterChildStopped:
-          childStoppedAt !== undefined && gcNotice.at >= childStoppedAt,
-        noticeWokeChild: runsAfterNotice.length > 0,
+        childRunInterrupted: childStoppedAt !== undefined,
+        // A notice after the stop wakes the child; one during the stop is absorbed without a run.
+        noticeHandledForItsOrder: noticeAfterChildStopped
+          ? runsAfterNotice.length > 0
+          : runsAfterNotice.length === 0,
         noticeRunsInterrupted: runsAfterNotice.every((start) =>
           stopsAfterNotice.some(
             (stop) => stop.at >= start.at && stop.at - start.at < 500,
