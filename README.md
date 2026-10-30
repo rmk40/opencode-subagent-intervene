@@ -4,6 +4,7 @@
 [![CI](https://github.com/rmk40/opencode-subagent-intervene/actions/workflows/ci.yml/badge.svg)](https://github.com/rmk40/opencode-subagent-intervene/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/rmk40/opencode-subagent-intervene)](LICENSE)
 [![OpenCode 2.2+](https://img.shields.io/badge/OpenCode-2.2%2B-black)](https://opencode.ai/v2/docs/)
+[![discord](https://img.shields.io/badge/discord-discussion-5865F2?logo=discord&logoColor=white)](https://discord.com/channels/1391832426048651334/1565393733204316290)
 
 An [OpenCode](https://opencode.ai) plugin that lets an agent stop the subagents it launched, including
 background ones, send them new instructions while they work, see which ones are still running, and
