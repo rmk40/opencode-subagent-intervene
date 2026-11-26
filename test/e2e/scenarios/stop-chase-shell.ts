@@ -2,8 +2,9 @@
 // that waits for a release file, then blocks in a real foreground `sleep`. subagent_stop stops the
 // child; the background command keeps running, as no plugin can cancel it. When the script
 // releases it, its completion notice wakes the stopped child, and the latch interrupts that run
-// within 500 ms: no child model request completes, nothing is persisted, and the parent gets no
-// further notice.
+// within 500 ms: no child model request completes, nothing is persisted, and the parent hears of
+// the child only through OpenCode's cancelled report of that run, which OpenCode 2.3 and later
+// send and earlier versions do not.
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Stream } from "effect";
@@ -18,6 +19,7 @@ import {
   forSession,
   instanceFor,
   notices,
+  onlyRunReports,
   pluginConsole,
   probePlugin,
   REPO_ROOT,
@@ -25,6 +27,7 @@ import {
   readLog,
   recordRequest,
   runDir,
+  runReports,
   toolCallResponse,
   until,
   waitEvent,
@@ -204,6 +207,13 @@ export default OpenCodeDriver.use(
         (r) => r.sessionID === child && r.at >= releaseAt,
       );
       const noticesNow = notices(dir, parent);
+      const reportsAfterRelease = runReports(
+        dir,
+        parent,
+        [child],
+        "cancelled",
+        releaseAt,
+      );
       const plugin = pluginConsole(artifacts);
 
       const evidence = {
@@ -235,6 +245,7 @@ export default OpenCodeDriver.use(
           last: r.last.text.slice(0, 160),
         })),
         parentNoticesNow: noticesNow.map((n) => n.metadata),
+        reportsAfterRelease,
         plugin,
       };
 
@@ -242,13 +253,15 @@ export default OpenCodeDriver.use(
         stopResultStopped:
           stopText.includes(`- ${child}`) && /: stopped$/m.test(stopText),
         childOutcomeInterrupted: childAfterStop.outcome === "interrupted",
+        // OpenCode before 2.3 fails the interrupted call as aborted; from 2.3 the shell tool stops
+        // the command itself and reports the call as interrupted.
         foregroundShellStopped: childAll().some(
           (e) =>
             e.type === "session.tool.failed" &&
             e.at >= stopAt &&
             typeof e.data === "string" &&
             e.data.includes('"id":"c_fg"') &&
-            e.data.includes('"aborted"'),
+            (e.errorType === "aborted" || e.toolInterrupted === true),
         ),
         exactlyOneCancelledNotice:
           noticesAfterStop.filter((n) =>
@@ -262,7 +275,7 @@ export default OpenCodeDriver.use(
             .length === 1,
         noStepCompleted: stepsEndedAfterStop.length === 0,
         noWokenReply: !JSON.stringify(context).includes("WOKEN-REPLY"),
-        noNewParentNotice: noticesNow.length === noticesAfterStop.length,
+        parentHeardOnlyRunReport: onlyRunReports(reportsAfterRelease),
         latchLoggedInterrupt: plugin.some(
           (line) =>
             line.includes("latch: interrupted a run in a stopped session") &&

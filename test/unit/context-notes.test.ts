@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
+import { Schema } from "effect";
 import {
   ContextNotesError,
   NOTES_ENTRY_KEY,
@@ -79,7 +80,7 @@ describe("request validation", () => {
   test.each([
     ["missing notes", { action: "save" as const }],
     ["empty notes", { action: "save" as const, notes: "" }],
-    ["8001 code points", { action: "save" as const, notes: "x".repeat(8001) }],
+    ["12001 code points", { action: "save" as const, notes: "x".repeat(12_001) }],
     ["notes with read", { action: "read" as const, notes: "x" }],
     ["notes with clear", { action: "clear" as const, notes: "x" }],
     ["empty notes with read", { action: "read" as const, notes: "" }],
@@ -87,10 +88,51 @@ describe("request validation", () => {
     expect(() => parseNotesRequest(input)).toThrow(ContextNotesError);
   });
 
-  test("counts code points, not UTF-16 units, at the 8000 boundary", () => {
-    // 8000 astral characters are 16000 UTF-16 units; 8001 must still be refused.
-    expect(parseNotesRequest({ action: "save", notes: "😀".repeat(8000) })).toEqual({ action: "save", notes: "😀".repeat(8000) });
-    expect(() => parseNotesRequest({ action: "save", notes: "😀".repeat(8001) })).toThrow(ContextNotesError);
+  test("counts code points, not UTF-16 units, at the 12000 boundary", () => {
+    // 12000 astral characters are 24000 UTF-16 units; 12001 must still be refused.
+    expect(parseNotesRequest({ action: "save", notes: "😀".repeat(12_000) })).toEqual({ action: "save", notes: "😀".repeat(12_000) });
+    expect(() => parseNotesRequest({ action: "save", notes: "😀".repeat(12_001) })).toThrow(ContextNotesError);
+  });
+
+  // Astral characters are two UTF-16 units each, so the reported length shows code points are counted.
+  test.each([
+    ["13,000 astral characters", "😀".repeat(13_000), "notes are 13,000 characters; the limit is 12,000 (1,000 over). Nothing was saved."],
+    ["one character over", `${"x".repeat(11_999)}😀😀`, "notes are 12,001 characters; the limit is 12,000 (1 over). Nothing was saved."],
+  ])("refuses %s with the length, limit and overage", (_, notes, message) => {
+    expect(() => parseNotesRequest({ action: "save", notes })).toThrow(new ContextNotesError(message));
+  });
+
+  test("gives empty notes their own error", () => {
+    let message = "";
+    try {
+      parseNotesRequest({ action: "save", notes: "" });
+    } catch (error) {
+      expect(error).toBeInstanceOf(ContextNotesError);
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/^notes are empty\b/);
+    expect(message).not.toMatch(/ over\)|the limit is/);
+    expect(message.endsWith("Nothing was saved.")).toBe(true);
+  });
+
+  test("an over-limit save through the tool reports the length and leaves the saved notes unchanged", async () => {
+    const world = setup();
+    world.instructions.seed(SESSION, KEY, stored("keep me"));
+    const error = await contextNotesTool(world.deps)
+      .execute({ action: "save", notes: "x".repeat(13_000) }, toolContext())
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ToolError);
+    expect((error as Error).message).toBe("notes are 13,000 characters; the limit is 12,000 (1,000 over). Nothing was saved.");
+    expect(world.instructions.writes()).toBe(0);
+    expect(world.instructions.value(SESSION)).toEqual(stored("keep me"));
+  });
+
+  test("saves notes at the limit in full", async () => {
+    const world = setup();
+    const notes = `${"x".repeat(11_999)}😀`;
+    const result = await world.run({ action: "save", notes });
+    expect(result).toMatchObject({ status: "saved", codePoints: 12_000 });
+    expect((world.instructions.value(SESSION) as { notes: string }).notes).toBe(notes);
   });
 
   test("keeps whitespace-only and padded notes exactly as given", () => {
@@ -207,7 +249,7 @@ describe("read", () => {
     ["a non-numeric savedAt", stored("n", { savedAt: "now" })],
     ["non-string notes", stored("n", { notes: 7 })],
     ["empty notes", stored("")],
-    ["over-long notes", stored("x".repeat(8001))],
+    ["over-long notes", stored("x".repeat(12_001))],
   ])("rejects an own entry holding %s and leaves it unchanged", async (_, value) => {
     const world = setup();
     world.instructions.seed(SESSION, KEY, value);
@@ -331,6 +373,14 @@ describe("the direct notes tool", () => {
     const error = await contextNotesTool(world.deps).execute({ action: "read" }, toolContext()).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ToolError);
     expect(String((error as Error).message)).toContain("does not hold working notes");
+  });
+
+  test("states the 12,000-character limit and the per-request cost in its descriptions", () => {
+    const tool = contextNotesTool(setup().deps);
+    expect(tool.description).toContain("1 to 12,000 characters");
+    expect(tool.description).toContain("They go with every request, so keep them concise.");
+    const schema = Schema.toJsonSchemaDocument(tool.input).schema;
+    expect(schema).toMatchObject({ properties: { notes: { description: expect.stringContaining("1 to 12,000 characters") } } });
   });
 
   test("uses the fixed exported key", () => {

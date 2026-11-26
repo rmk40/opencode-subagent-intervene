@@ -3,6 +3,9 @@
 // shell, and one that finished. The stop covers the busy child, the idle child, and its
 // grandchild, and leaves the finished child out. The parent keeps running and answers after the
 // tool result, and the idle child stays stopped when its grandchild's cancelled notice arrives.
+// The parent hears the busy child's cancelled notice. OpenCode 2.3 and later also report every run
+// of a subagent that ends, so a run of the idle child that the stop or the latch interrupts adds a
+// cancelled report about it; nothing else reaches the parent.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Option, Stream } from "effect";
@@ -20,6 +23,7 @@ import {
   LIST_SUBTREE_CODE,
   listedLatches,
   notices,
+  onlyRunReports,
   pluginConsole,
   probePlugin,
   REPO_ROOT,
@@ -28,6 +32,7 @@ import {
   readToolResults,
   recordRequest,
   runDir,
+  runReports,
   takeCall,
   toolCallResponse,
   until,
@@ -250,6 +255,14 @@ export default OpenCodeDriver.use(
       const parentNotices = notices(dir, parent).filter(
         (n) => n.at >= stopAt && n.at < listAt,
       );
+      const parentReports = runReports(
+        dir,
+        parent,
+        [busy, waiter],
+        "cancelled",
+        stopAt,
+        listAt,
+      );
 
       const evidence = {
         dir,
@@ -273,6 +286,7 @@ export default OpenCodeDriver.use(
         })),
         grandchildNoticeToWaiter: gcNotice?.metadata,
         parentNoticesAfterStop: parentNotices.map((n) => n.metadata),
+        parentReports,
         latches: Object.fromEntries(
           [busy, waiter, done, gc].map((id) => [id, latches.get(id) ?? null]),
         ),
@@ -305,10 +319,9 @@ export default OpenCodeDriver.use(
           !JSON.stringify(waiterContext).includes("WAITER-WOKEN-REPLY"),
         grandchildNoticeReachedWaiter: gcNotice !== undefined,
         noStepCompleted: stepsEnded.length === 0,
-        parentHeardOnlyBusy:
-          parentNotices.length === 1 &&
-          JSON.stringify(parentNotices[0]?.metadata).includes(busy) &&
-          JSON.stringify(parentNotices[0]?.metadata).includes('"cancelled"'),
+        parentHeardOnlyStoppedRuns:
+          onlyRunReports(parentReports, [busy]) &&
+          parentReports.byChild[busy]?.reports === 1,
         latchesMatch:
           latches.get(busy) === "active" &&
           latches.get(waiter) === "active" &&

@@ -13,12 +13,16 @@
 //
 // A steered notice reaches a running parent only once its tool calls in flight finish. A parent
 // blocked in a foreground `subagent` call on the waiting subagent would read it only after that
-// subagent is done, when the notice is stale, so such a parent is not told while the call runs.
-// The call is told from events too: while a `subagent` call runs, its tool progress names the
-// subagent, but the parent's context leaves that progress out. The call can end with the prompt
-// still open, when a person moves it to the background, so the prompt is checked again then.
+// subagent is done, when the notice is stale, so such a parent is not told while the call runs
+// (see `ForegroundCalls`). The call can end with the prompt still open, when a person moves it to
+// the background, so the prompt is checked again then.
 
 import { createHash } from "node:crypto";
+import {
+  type EndedCalls,
+  ForegroundCalls,
+  type RunningCall,
+} from "@/core/foreground";
 import type { Latch } from "@/core/latch";
 import {
   type Clock,
@@ -93,13 +97,6 @@ interface TrackedPrompt {
   blockedBy: RunningCall | undefined;
 }
 
-/** A tool call running in a parent session, identified the way its terminal event names it. */
-interface RunningCall {
-  readonly parentID: SessionID;
-  readonly assistantMessageID: string;
-  readonly callID: string;
-}
-
 type Composed =
   | { readonly type: "post"; readonly notice: SyntheticMessage }
   | { readonly type: "skip" }
@@ -133,8 +130,7 @@ export class PromptNotices {
    * it until its reply or cancel event, the end of its session's run, or the session's deletion.
    */
   private readonly tracked = new Map<string, TrackedPrompt>();
-  /** Running calls whose tool progress names a subagent, by that subagent's session ID. */
-  private readonly calls = new Map<SessionID, RunningCall>();
+  private readonly calls = new ForegroundCalls();
   private disposed = false;
 
   constructor(deps: PromptNoticeDeps, options: PromptNoticeOptions = {}) {
@@ -192,6 +188,8 @@ export class PromptNotices {
   }
 
   private handle(event: OpenCodeEvent): void {
+    const ended = this.calls.onEvent(event);
+    if (ended !== undefined) this.callsEnded(ended);
     switch (event.type) {
       case "permission.asked":
         return this.track({
@@ -223,65 +221,24 @@ export class PromptNotices {
         return this.untrack(
           promptKey(event.data.sessionID, "question", event.data.id),
         );
-      case "session.tool.progress": {
-        // Core's `subagent` tool publishes `{ sessionID: <subagent>, status: "running" }` once
-        // the subagent is chosen. A call that returns at once, launching in the background or
-        // steering, ends straight after, which forgets it again.
-        const subagentID = event.data.metadata["sessionID"];
-        if (
-          typeof subagentID !== "string" ||
-          subagentID === event.data.sessionID
-        ) {
-          return;
-        }
-        this.calls.set(subagentID, {
-          parentID: event.data.sessionID,
-          assistantMessageID: event.data.assistantMessageID,
-          callID: event.data.id,
-        });
-        return;
-      }
-      case "session.tool.success":
-      case "session.tool.failed": {
-        // Provider call IDs can repeat across messages, so the message ID is compared too.
-        const { sessionID, assistantMessageID, id } = event.data;
-        return this.callsEnded(
-          (call) =>
-            call.parentID === sessionID &&
-            call.assistantMessageID === assistantMessageID &&
-            call.callID === id,
-        );
-      }
-      // An interrupted run drops its permission prompts without a reply event, and every call
-      // a run makes ends with it.
+      // An interrupted run drops its permission prompts without a reply event.
       case "session.execution.succeeded":
       case "session.execution.failed":
-      case "session.execution.interrupted": {
-        const sessionID = event.data.sessionID;
-        this.untrackSession(sessionID);
-        return this.callsEnded((call) => call.parentID === sessionID);
-      }
-      case "session.deleted": {
-        const sessionID = event.data.sessionID;
-        this.untrackSession(sessionID);
-        this.calls.delete(sessionID);
-        return this.callsEnded((call) => call.parentID === sessionID);
-      }
+      case "session.execution.interrupted":
+      case "session.deleted":
+        return this.untrackSession(event.data.sessionID);
       default:
         return;
     }
   }
 
   /**
-   * Forgets the matching calls and schedules another check of every prompt one of them held
-   * back. The prompt has been open longer than the delay by then, so only a short settling wait
-   * comes before the check. A call that ends after its subagent's prompt was answered holds
-   * nothing back, since answering closed the prompt.
+   * Schedules another check of every prompt one of the ended calls held back. The prompt has been
+   * open longer than the delay by then, so only a short settling wait comes before the check. A
+   * call that ends after its subagent's prompt was answered holds nothing back, since answering
+   * closed the prompt.
    */
-  private callsEnded(matches: (call: RunningCall) => boolean): void {
-    for (const [subagentID, call] of this.calls) {
-      if (matches(call)) this.calls.delete(subagentID);
-    }
+  private callsEnded(matches: EndedCalls): void {
     for (const [key, entry] of this.tracked) {
       if (entry.blockedBy === undefined || !matches(entry.blockedBy)) continue;
       entry.blockedBy = undefined;
@@ -371,8 +328,8 @@ export class PromptNotices {
     // A parent blocked in a call on the child would read the notice only after the call returns.
     // The call is recorded on the prompt here, with no wait in between, so its end event cannot
     // arrive before the prompt is marked as held.
-    const call = this.calls.get(child.id);
-    if (call?.parentID === child.parentID) {
+    const call = this.calls.blocking(child.id, child.parentID);
+    if (call !== undefined) {
       const entry = this.tracked.get(key);
       if (entry?.prompt === prompt) entry.blockedBy = call;
       return { type: "blocked" };
@@ -447,19 +404,32 @@ export interface WaitingNotice {
 
 /** The text the parent reads. Every quoted value is escaped and capped. */
 export function renderWaitingNotice(notice: WaitingNotice): string {
-  const id = clean(notice.sessionID, ID_MAX);
-  const agent = clean(notice.agent ?? "", AGENT_MAX);
-  const title = clean(notice.title ?? "", TITLE_MAX);
-  const label = [
-    ...(agent === "" ? [] : [agent]),
-    ...(title === "" ? [] : [`"${title}"`]),
-  ];
-  const who = `Your subagent ${id}${label.length === 0 ? "" : ` (${label.join(", ")})`}`;
+  const idAttribute = sanitizeText(notice.sessionID, ID_MAX, "attribute").text;
+  const who = describeSubagent(notice);
   const waiting =
     notice.waitedMs < 1000
       ? "is waiting"
       : `has been waiting ${formatDuration(notice.waitedMs)}`;
-  return `<subagent-waiting sessionID="${id}" kind="${notice.prompt.kind}">${who} ${waiting} on ${describePrompt(notice.prompt)}. Only a person can answer it, in OpenCode. Tell the user, or stop it with subagent_stop. It continues on its own once someone answers.</subagent-waiting>`;
+  return `<subagent-waiting sessionID="${idAttribute}" kind="${notice.prompt.kind}">${who} ${waiting} on ${describePrompt(notice.prompt)}. Only a person can answer it, in OpenCode. Tell the user, or stop it with subagent_stop. It continues on its own once someone answers.</subagent-waiting>`;
+}
+
+/**
+ * `Your subagent <id> (agent, "title")` as notice element text, each value escaped and capped.
+ * Shared by the notices posted to a parent.
+ */
+export function describeSubagent(subagent: {
+  readonly sessionID: SessionID;
+  readonly agent?: string;
+  readonly title?: string;
+}): string {
+  const id = clean(subagent.sessionID, ID_MAX);
+  const agent = clean(subagent.agent ?? "", AGENT_MAX);
+  const title = clean(subagent.title ?? "", TITLE_MAX);
+  const label = [
+    ...(agent === "" ? [] : [agent]),
+    ...(title === "" ? [] : [`"${title}"`]),
+  ];
+  return `Your subagent ${id}${label.length === 0 ? "" : ` (${label.join(", ")})`}`;
 }
 
 function describePrompt(prompt: PromptDetails): string {
@@ -480,8 +450,9 @@ function describePrompt(prompt: PromptDetails): string {
     : `a permission prompt: ${what} for ${list.join(", ")}`;
 }
 
+/** Element text of a notice. */
 function clean(value: string, maxCodePoints: number): string {
-  return sanitizeText(value, maxCodePoints).text;
+  return sanitizeText(value, maxCodePoints, "text").text;
 }
 
 function promptKey(

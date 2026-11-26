@@ -33,8 +33,13 @@ export interface ActiveTool {
    * streaming one. Cut only to fit the budget.
    */
   readonly input: string;
-  /** Milliseconds since the tool started running; left out until it starts or without `now`. */
+  /**
+   * Milliseconds since the tool started running, or since its input started when the start of
+   * running is not stored; left out while it streams or without `now`.
+   */
   readonly runningForMs?: number;
+  /** Milliseconds since a streaming tool's input started; left out once it runs or without `now`. */
+  readonly streamingForMs?: number;
 }
 
 export interface ContextSummary {
@@ -160,10 +165,9 @@ export function renderContextSummary(summary: ContextSummary): string {
   } else {
     lines.push("Active tools:");
     for (const tool of summary.activeTools) {
+      const age = tool.runningForMs ?? tool.streamingForMs;
       const status =
-        tool.runningForMs === undefined
-          ? tool.status
-          : `${tool.status}, ${formatDuration(tool.runningForMs)}`;
+        age === undefined ? tool.status : `${tool.status}, ${formatDuration(age)}`;
       const input = tool.input === "" ? "" : `: ${tool.input}`;
       lines.push(`- ${tool.name} (${status})${input}`);
     }
@@ -204,17 +208,40 @@ function withPart(whole: string, part: number, unit: string): string {
   return part === 0 ? whole : `${whole} ${part}${unit}`;
 }
 
-/**
- * Names of the tool calls still streaming or running in the messages after the latest completed
- * compaction, oldest first. The same calls `summarizeContext` reports as active, with no budget.
- */
+/** The names of the calls `activeToolTimes` returns. */
 export function activeToolNames(
   messages: readonly SessionMessageInfo[],
 ): string[] {
+  return activeToolTimes(messages).map((tool) => tool.name);
+}
+
+export interface ActiveToolTime {
+  readonly name: string;
+  readonly status: "streaming" | "running";
+  /** When it started running, or for a streaming tool when its input started, as stored. */
+  readonly since: number;
+}
+
+/**
+ * The tool calls still streaming or running in the messages after the latest completed
+ * compaction, oldest first, with when each started. The same calls `summarizeContext` reports as
+ * active, with no budget.
+ */
+export function activeToolTimes(
+  messages: readonly SessionMessageInfo[],
+): ActiveToolTime[] {
   return sinceCompaction(messages)
     .assistants.flatMap((message) => message.content)
     .flatMap((part) =>
-      part.type === "tool" && isActive(part.state) ? [part.name] : [],
+      part.type === "tool" && isActive(part.state)
+        ? [
+            {
+              name: part.name,
+              status: part.state.status,
+              since: activeSince(part),
+            },
+          ]
+        : [],
     );
 }
 
@@ -256,7 +283,7 @@ function activeCandidate(
 ): ActiveTool[] {
   const state = tool.state;
   if (!isActive(state)) return [];
-  const ran = tool.time.ran;
+  const age = now === undefined ? undefined : Math.max(0, now - activeSince(tool));
   return [
     {
       name: tool.name,
@@ -267,11 +294,23 @@ function activeCandidate(
         state.status === "streaming"
           ? state.input.replace(/\s*\n\s*/g, " ").trim()
           : JSON.stringify(state.input),
-      ...(ran === undefined || now === undefined
+      ...(age === undefined
         ? {}
-        : { runningForMs: Math.max(0, now - ran) }),
+        : state.status === "streaming"
+          ? { streamingForMs: age }
+          : { runningForMs: age }),
     },
   ];
+}
+
+/**
+ * When an active tool call started: when it started running, or, for one still streaming its
+ * input or one stored without that time, when its input started.
+ */
+function activeSince(tool: ToolPart): number {
+  return tool.state.status === "running"
+    ? (tool.time.ran ?? tool.time.created)
+    : tool.time.created;
 }
 
 /**

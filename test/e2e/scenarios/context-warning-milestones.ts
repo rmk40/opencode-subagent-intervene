@@ -193,7 +193,7 @@ export default OpenCodeDriver.use(
               item.text.includes(
                 "190k / 200k input (95.01%) · 10k remaining · UI/context 19% of 1M",
               ) &&
-              item.text.includes("default auto ~170k (20k past estimate)"),
+              item.text.includes("assumed default auto ~170k (20k past estimate)"),
           ),
           noticesRetainPlanningGuidanceAcrossModelAndEpochChanges: [
             ...first,

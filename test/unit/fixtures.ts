@@ -290,6 +290,8 @@ export class FakeSessionReader implements SessionReader {
   readonly failingGets = new Set<SessionID>();
   /** Sessions whose `context` rejects. */
   readonly failingContexts = new Set<SessionID>();
+  /** Sessions whose `pendingPermissions` rejects. */
+  readonly failingPermissions = new Set<SessionID>();
 
   constructor(sessions: readonly SessionInfo[] = [], pageSize = 100) {
     for (const session of sessions) this.sessions.set(session.id, session);
@@ -342,6 +344,9 @@ export class FakeSessionReader implements SessionReader {
   }
 
   async pendingPermissions(sessionID: SessionID): Promise<readonly string[]> {
+    if (this.failingPermissions.has(sessionID)) {
+      throw new Error(`pendingPermissions ${sessionID} failed`);
+    }
     return this.pending.get(sessionID) ?? [];
   }
 }

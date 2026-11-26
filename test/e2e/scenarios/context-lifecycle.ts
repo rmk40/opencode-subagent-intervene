@@ -336,7 +336,7 @@ export default OpenCodeDriver.use(
             warning.text.includes(
               "150k / 200k input (75.01%) · 50k remaining",
             ) &&
-            warning.text.includes("default auto ~170k (20k away)") &&
+            warning.text.includes("assumed default auto ~170k (20k away)") &&
             noticeHasPlanningGuidance(warning.text) &&
             /measured \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/.test(warning.text);
         }

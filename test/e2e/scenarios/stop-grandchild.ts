@@ -4,7 +4,9 @@
 // cancelled notice wakes the already stopped child; the run it starts is interrupted at once. When
 // the notice instead lands while the child's run is still stopping, the stop's interrupt clears the
 // wake and no new run starts. Either way the child stays stopped, nothing is persisted, and the
-// parent hears only about the child; the evidence records which order happened.
+// parent hears only about the child; the evidence records which order happened. OpenCode 2.3 and
+// later report every run of a subagent that ends, so a woken run the latch interrupts adds a
+// cancelled report about the child to the one for the stopped run.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Option, Stream } from "effect";
@@ -22,12 +24,14 @@ import {
   LIST_SUBTREE_CODE,
   listedLatches,
   notices,
+  onlyRunReports,
   pluginConsole,
   probePlugin,
   REPO_ROOT,
   readLog,
   recordRequest,
   runDir,
+  runReports,
   takeCall,
   toolCallResponse,
   until,
@@ -220,6 +224,13 @@ export default OpenCodeDriver.use(
       const lineFor = (id: string) =>
         stopText.split("\n").find((line) => line.startsWith(`- ${id}`));
       const parentNotices = notices(dir, parent).filter((n) => n.at >= stopAt);
+      const parentReports = runReports(
+        dir,
+        parent,
+        [child],
+        "cancelled",
+        stopAt,
+      );
       const latches = listedLatches(codeModeValue(listText));
       const plugin = pluginConsole(artifacts);
 
@@ -254,6 +265,7 @@ export default OpenCodeDriver.use(
           reason: e.reason,
         })),
         parentNoticesAfterStop: parentNotices.map((n) => n.metadata),
+        parentReports,
         latches: {
           child: latches.get(child),
           grandchild: latches.get(grandchild),
@@ -285,10 +297,7 @@ export default OpenCodeDriver.use(
         noStepCompleted: stepsEnded.length === 0,
         noWokenReply:
           !JSON.stringify(childContext).includes("CHILD-WOKEN-REPLY"),
-        parentHeardOnlyChild:
-          parentNotices.length === 1 &&
-          JSON.stringify(parentNotices[0]?.metadata).includes(child) &&
-          JSON.stringify(parentNotices[0]?.metadata).includes('"cancelled"'),
+        parentHeardOnlyChild: onlyRunReports(parentReports, [child]),
         bothLatched:
           latches.get(child) === "active" &&
           latches.get(grandchild) === "active",

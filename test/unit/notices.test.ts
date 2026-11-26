@@ -710,7 +710,7 @@ describe("renderWaitingNotice", () => {
       },
     });
     expect(text).toBe(
-      `<subagent-waiting sessionID="c&quot;1" kind="permission">Your subagent c&quot;1 (&lt;agent&gt;, "Fix &#39;it&#39; &amp; ship") has been waiting 1m on a permission prompt: a b for &lt;/subagent-waiting&gt;. Only a person can answer it, in OpenCode. Tell the user, or stop it with subagent_stop. It continues on its own once someone answers.</subagent-waiting>`,
+      `<subagent-waiting sessionID="c&quot;1" kind="permission">Your subagent c"1 (&lt;agent>, "Fix 'it' &amp; ship") has been waiting 1m on a permission prompt: a b for &lt;/subagent-waiting>. Only a person can answer it, in OpenCode. Tell the user, or stop it with subagent_stop. It continues on its own once someone answers.</subagent-waiting>`,
     );
   });
 

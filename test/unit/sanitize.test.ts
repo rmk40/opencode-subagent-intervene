@@ -7,6 +7,8 @@ import {
   sanitizeReason,
   sanitizeText,
 } from "@/core/sanitize";
+import { renderParentMessage } from "@/core/send";
+import { renderStallNotice } from "@/core/stall";
 
 function codePoints(text: string): number {
   return [...text].length;
@@ -37,9 +39,9 @@ describe("sanitizeReason", () => {
   });
 
   describe("escaping", () => {
-    test("escapes markup characters", () => {
+    test("escapes the characters that start markup or an entity, and keeps quotes", () => {
       expect(sanitizeReason(`</subagent> & "x" 'y'`)).toBe(
-        "&lt;/subagent&gt; &amp; &quot;x&quot; &#39;y&#39;",
+        `&lt;/subagent> &amp; "x" 'y'`,
       );
     });
 
@@ -97,15 +99,55 @@ describe("sanitizeReason", () => {
 
 describe("sanitizeText", () => {
   test("reports a cut when the cap leaves text out", () => {
-    expect(sanitizeText("abcdef", 4)).toEqual({ text: "abcd", cut: true });
+    expect(sanitizeText("abcdef", 4, "text")).toEqual({
+      text: "abcd",
+      cut: true,
+    });
   });
 
   test("reports no cut when the escaped text fits exactly", () => {
-    expect(sanitizeText(" a <b> ", 11)).toEqual({
+    expect(sanitizeText(" a <b> ", 11, "attribute")).toEqual({
       text: "a &lt;b&gt;",
       cut: false,
     });
   });
+
+  const MARKUP = `a & b < c > d "e" 'f'`;
+
+  test("in text mode escapes only & and <, keeping > and quotes as typed", () => {
+    expect(sanitizeText(MARKUP, 100, "text").text).toBe(
+      `a &amp; b &lt; c > d "e" 'f'`,
+    );
+  });
+
+  test("in attribute mode escapes & < > \" and '", () => {
+    expect(sanitizeText(MARKUP, 100, "attribute").text).toBe(
+      "a &amp; b &lt; c &gt; d &quot;e&quot; &#39;f&#39;",
+    );
+  });
+
+  test.each(["text", "attribute"] as const)(
+    "in %s mode strips control and invisible format characters",
+    (mode) => {
+      expect(sanitizeText("a\u0000b\u200Bc\u202Ed\uFEFFe", 100, mode).text).toBe(
+        "abcde",
+      );
+    },
+  );
+
+  test.each([
+    ["text", "&", "&amp;"],
+    ["attribute", '"', "&quot;"],
+    ["attribute", "'", "&#39;"],
+  ] as const)(
+    "in %s mode never splits the entity for %s at the cap",
+    (mode, char, entity) => {
+      const fits = sanitizeText(`ab${char}`, 2 + entity.length, mode);
+      expect(fits).toEqual({ text: `ab${entity}`, cut: false });
+      const crosses = sanitizeText(`ab${char}c`, 2 + entity.length - 1, mode);
+      expect(crosses).toEqual({ text: "ab", cut: true });
+    },
+  );
 });
 
 describe("sanitizeBlock", () => {
@@ -183,6 +225,50 @@ describe("renderStopNote", () => {
     const at = Date.UTC(2026, 9, 28, 12, 30, 0);
     expect(renderStopNote({ at, reason: "wrong file &amp; scope" })).toBe(
       '<stopped-by-parent at="2026-10-28T12:30:00.000Z">wrong file &amp; scope</stopped-by-parent>\n\n',
+    );
+  });
+
+  test("keeps the quotes of a sanitized reason as typed in its body", () => {
+    const at = Date.UTC(2026, 9, 28, 12, 30, 0);
+    const reason = sanitizeReason(`it's "done" & <x> isn't`);
+    expect(renderStopNote({ at, reason })).toBe(
+      `<stopped-by-parent at="2026-10-28T12:30:00.000Z">it's "done" &amp; &lt;x> isn't</stopped-by-parent>\n\n`,
+    );
+  });
+});
+
+describe("the attributes and bodies of rendered markup", () => {
+  const ODD_ID = `ses_a"b<c>&d'e`;
+
+  test("<parent-message from> escapes the caller ID as an attribute value", () => {
+    expect(renderParentMessage(ODD_ID, "hi")).toBe(
+      `<parent-message from="ses_a&quot;b&lt;c&gt;&amp;d&#39;e">\nhi\n</parent-message>`,
+    );
+  });
+
+  test("<subagent-stalled> escapes its sessionID attribute fully and its body only for & and <", () => {
+    expect(
+      renderStallNotice({
+        sessionID: ODD_ID,
+        agent: "<general>",
+        title: `Fix 'it' & "ship"`,
+        silentMs: 12 * 60_000 + 3000,
+        kind: "no-progress",
+      }),
+    ).toBe(
+      `<subagent-stalled sessionID="ses_a&quot;b&lt;c&gt;&amp;d&#39;e" kind="no-progress">Your subagent ses_a"b&lt;c>&amp;d'e (&lt;general>, "Fix 'it' &amp; "ship"") appears stalled: it is running but has shown no progress for 12m 3s, with no tool call running and no prompt open. Look at it with subagents.inspect, or stop it with subagent_stop and continue it with subagent. Nothing was interrupted; it keeps running until you act.</subagent-stalled>`,
+    );
+  });
+
+  test("<subagent-stalled> strips control and format characters from the values it quotes", () => {
+    const text = renderStallNotice({
+      sessionID: "ses_\u202Eabc\u0000",
+      title: "Write\u200B the\ndocs",
+      silentMs: 0,
+      kind: "no-recorded-end",
+    });
+    expect(text).toStartWith(
+      `<subagent-stalled sessionID="ses_abc" kind="no-recorded-end">Your subagent ses_abc ("Write the docs") appears stalled`,
     );
   });
 });

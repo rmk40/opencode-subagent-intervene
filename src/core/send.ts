@@ -3,18 +3,23 @@
 // boundary and an idle one is never started: a run the plugin starts has no subagent job, so its
 // result would never reach the parent.
 
+import { type ActivityTracker, idleSince } from "@/core/activity";
 import { assertDescendant, type Descendant } from "@/core/ancestry";
+import { overLimit } from "@/core/errors";
 import type { Latch } from "@/core/latch";
 import {
+  type Clock,
   PLUGIN_ID,
   type RunState,
   type SessionID,
+  type SessionInfo,
   type SessionMessenger,
   type SessionReader,
 } from "@/core/ports";
 import type { RunStateTracker } from "@/core/run-state";
 import { sanitizeBlock, sanitizeText } from "@/core/sanitize";
 import { CONTINUE_NESTED_NOTE, CONTINUE_OWN_NOTE } from "@/core/stop";
+import { formatDuration } from "@/core/summarize";
 
 export const MESSAGE_MAX_CODE_POINTS = 8000;
 /** The element that wraps a parent message in the text the subagent reads. */
@@ -39,6 +44,9 @@ export interface SendDeps {
   readonly messenger: SessionMessenger;
   readonly latch: Pick<Latch, "isActive">;
   readonly runState: Pick<RunStateTracker, "observe">;
+  readonly clock: Pick<Clock, "now">;
+  /** Live activity, for the target's last activity. Without it, none is known. */
+  readonly activity?: Pick<ActivityTracker, "get">;
 }
 
 export interface SendCall {
@@ -75,8 +83,10 @@ export interface SendResult {
 
 /**
  * Steers the message into a running subagent of the caller. Throws `SendError` or an
- * `AncestryError` before anything is sent: a stopped or idle target is refused. Resolves
- * `undefined` when `call.signal` aborts before the message is posted, and then sends nothing.
+ * `AncestryError` before anything is sent: a stopped or idle target is refused, and so is one
+ * OpenCode reports idle although its last run recorded no end, since nothing would read the
+ * message until it is continued. Resolves `undefined` when `call.signal` aborts before the message
+ * is posted, and then sends nothing. Surrounding whitespace in the session ID is ignored.
  */
 export async function sendToSubagent(
   deps: SendDeps,
@@ -88,7 +98,7 @@ export async function sendToSubagent(
   const message = sanitizeMessage(request.message);
   const target = await assertDescendant(
     deps.reader,
-    request.sessionID,
+    request.sessionID.trim(),
     call.callerID,
   );
   if (latching && (await deps.latch.isActive(target.id))) {
@@ -96,10 +106,14 @@ export async function sendToSubagent(
       `Subagent ${target.id} is stopped, so nothing was sent. ${continueNote(target, CONTINUE_OWN_NOTE)}`,
     );
   }
-  const before = await deps.runState.observe(target.id);
+  const before = await deps.runState.observe(target.id, target.info);
   if (before.state === "idle") {
+    // Read again: the session may have ended its run since the ancestry check read it.
+    const info = (await deps.reader.get(target.id)) ?? target.info;
     throw new SendError(
-      `Subagent ${target.id} is idle, so nothing was sent: a message only reaches a running subagent. ${continueNote(target, CONTINUE_IDLE_NOTE)}`,
+      before.noRecordedEnd === true
+        ? `Subagent ${target.id} is not running, so nothing was sent: OpenCode reports it idle, but its last run recorded no end, so the message would not be read until it is continued with subagent. ${unendedAge(deps, target.id)} ${continueNote(target, CONTINUE_IDLE_NOTE)}`
+        : `Subagent ${target.id} is idle, so nothing was sent: a message only reaches a running subagent. ${idleAge(info, deps.clock.now())} ${continueNote(target, CONTINUE_IDLE_NOTE)}`,
     );
   }
   if (call.signal.aborted) return undefined;
@@ -113,7 +127,7 @@ export async function sendToSubagent(
     resume: false,
   });
 
-  const after = await deps.runState.observe(target.id);
+  const after = await deps.runState.observe(target.id, target.info);
   return {
     target,
     messageID: posted.id,
@@ -131,7 +145,11 @@ export function renderParentMessage(
   callerID: SessionID,
   message: string,
 ): string {
-  const from = sanitizeText(callerID, CALLER_ID_MAX_CODE_POINTS).text;
+  const from = sanitizeText(
+    callerID,
+    CALLER_ID_MAX_CODE_POINTS,
+    "attribute",
+  ).text;
   return `<${MESSAGE_WRAPPER} from="${from}">\n${message}\n</${MESSAGE_WRAPPER}>`;
 }
 
@@ -153,8 +171,24 @@ function sanitizeMessage(raw: string): string {
   const length = [...text].length;
   if (length > MESSAGE_MAX_CODE_POINTS) {
     throw new SendError(
-      `The message is ${length} characters long; keep it to ${MESSAGE_MAX_CODE_POINTS} at most. Nothing was sent.`,
+      `message is ${overLimit(length, MESSAGE_MAX_CODE_POINTS)}. Nothing was sent.`,
     );
   }
   return text;
+}
+
+/** How long ago an idle session went idle, as a sentence. */
+function idleAge(info: SessionInfo, now: number): string {
+  const idle = idleSince(info, false);
+  return idle === undefined
+    ? "When it went idle was not recorded."
+    : `It went idle ${formatDuration(Math.max(0, now - idle))} ago.`;
+}
+
+/** For a session whose last run recorded no end, its idle time is unknown; its last activity may not be. */
+function unendedAge(deps: SendDeps, sessionID: SessionID): string {
+  const last = deps.activity?.get(sessionID)?.lastProgressAt;
+  return last === undefined
+    ? "When it stopped running is unknown."
+    : `When it stopped running is unknown; its last activity was ${formatDuration(Math.max(0, deps.clock.now() - last))} ago.`;
 }

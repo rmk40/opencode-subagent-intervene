@@ -3,12 +3,14 @@
 
 import { Error as ToolError, type Info } from "@opencode/plugin/promise/tool";
 import { Schema } from "effect";
+import { activityPhase, type SessionActivity } from "@/core/activity";
 import type {
   Logger,
   RunState,
   SessionID,
   SessionMessageInfo,
 } from "@/core/ports";
+import type { RunStateTracker } from "@/core/run-state";
 import {
   continueNote,
   MESSAGE_MAX_CODE_POINTS,
@@ -18,14 +20,19 @@ import {
   type SendResult,
   sendToSubagent,
 } from "@/core/send";
-import { activeToolNames } from "@/core/summarize";
+import {
+  type ActiveToolTime,
+  activeToolTimes,
+  formatDuration,
+  sinceCompaction,
+} from "@/core/summarize";
 import {
   errorMessage,
   pendingActions,
   RunStateSchema,
   sessionLabel,
   TOOL_PERMISSION,
-  toToolError,
+  toToolErrorWithSuggestions,
 } from "@/tools/shared";
 
 export const NAME = "subagent_send";
@@ -36,7 +43,7 @@ export const DESCRIPTION =
 export const Input = Schema.Struct({
   sessionID: Schema.String.annotate({
     description:
-      "The sessionID of a running subagent you launched, or one launched below it.",
+      "The sessionID of a running subagent you launched, or one launched below it. Surrounding whitespace is ignored.",
   }),
   message: Schema.String.annotate({
     description: `What to tell it, at most ${MESSAGE_MAX_CODE_POINTS} characters. Line breaks, indentation, lists, and code arrive as you write them.`,
@@ -67,13 +74,22 @@ export const Output = Schema.Struct({
     description:
       "It is waiting on a permission prompt and reads the message only after someone answers. False unless status is sent.",
   }),
-  note: Schema.String,
+  lastActivityAt: Schema.optionalKey(Schema.Number).annotate({
+    description:
+      "When it last made progress, in epoch milliseconds, as this plugin instance observed it. Absent when it has observed none.",
+  }),
+  note: Schema.String.annotate({
+    description:
+      "When it reads the message, with how long its current tool calls or model response have been going.",
+  }),
 });
 
 export type SendOutput = typeof Output.Type;
 
 export interface SendToolDeps extends SendDeps {
   readonly logger: Logger;
+  /** `observeAll` gives the state of the IDs suggested for a mistyped target. */
+  readonly runState: Pick<RunStateTracker, "observe" | "observeAll">;
 }
 
 export function sendTool(
@@ -106,7 +122,7 @@ export function sendTool(
         if (error instanceof SendError) {
           throw new ToolError({ message: error.message });
         }
-        throw toToolError(error);
+        throw await toToolErrorWithSuggestions(error, deps, context.sessionID);
       }
     },
   };
@@ -133,11 +149,15 @@ async function describeResult(
   result: SendResult,
 ): Promise<SendOutput> {
   const { target, messageID, postedAt, before, after } = result;
+  const live = deps.activity?.get(target.id);
   const base = {
     sessionID: target.id,
     ...(target.info.title === undefined ? {} : { title: target.info.title }),
     ...(target.info.agent === undefined ? {} : { agent: target.info.agent }),
     state: after,
+    ...(live?.lastProgressAt === undefined
+      ? {}
+      : { lastActivityAt: live.lastProgressAt }),
   };
   const unknownBefore = before === "unknown" ? `${UNKNOWN_BEFORE_NOTE} ` : "";
   const [messages, pending] = await Promise.all([
@@ -174,21 +194,36 @@ async function describeResult(
       note: `${unknownBefore}It finished its run before reading your message, so the message waits in its queue and is delivered when it is next continued. ${continueNow}`,
     };
   }
-  const activeTools = messages === undefined ? [] : activeToolNames(messages);
+  const activeTools = messages === undefined ? [] : activeToolTimes(messages);
   return {
     ...base,
     status: "sent",
-    activeTools,
+    activeTools: activeTools.map((tool) => tool.name),
     waitingOnPermission: pending.length > 0,
-    note: sentNote(before, after, activeTools, pending),
+    note: sentNote(before, after, pending, {
+      now: deps.clock.now(),
+      tools: activeTools,
+      live,
+      storedResponseStart:
+        messages === undefined ? undefined : openResponseStart(messages),
+    }),
   };
+}
+
+/** What the sent note says about the target's current work. */
+interface Progress {
+  readonly now: number;
+  readonly tools: readonly ActiveToolTime[];
+  readonly live: SessionActivity | undefined;
+  /** When the latest stored model response started, if it has not completed. */
+  readonly storedResponseStart: number | undefined;
 }
 
 function sentNote(
   before: RunState,
   after: Exclude<RunState, "idle">,
-  activeTools: readonly string[],
   pending: readonly string[],
+  progress: Progress,
 ): string {
   const unknownBefore = before === "unknown" ? `${UNKNOWN_BEFORE_NOTE} ` : "";
   if (pending.length > 0) {
@@ -198,15 +233,59 @@ function sentNote(
         : unknownBefore;
     return `${state}It is waiting on a permission prompt (${pending.join(", ")}), so it reads your message only after someone answers it. Only a person can answer it, in OpenCode.`;
   }
-  const when =
-    activeTools.length > 0
-      ? `after its current tool calls finish: ${activeTools.join(", ")}`
-      : "once its current model response finishes";
+  const when = whenRead(progress);
   if (after === "unknown") {
     const moment = before === "unknown" ? "" : " after sending";
     return `Its run state could not be determined${moment}. If it is running, it reads your message ${when}; if it is idle, the message waits until it is next continued.`;
   }
   return `${unknownBefore}It reads your message ${when}. ${REDIRECT_NOTE}`;
+}
+
+/**
+ * When the target reads the message, with ages: its tool calls from their stored start times, and
+ * a model response from live events, or from the stored message when the instance saw none.
+ */
+function whenRead(progress: Progress): string {
+  const { now, tools, live } = progress;
+  const ago = (at: number) => `${formatDuration(Math.max(0, now - at))} ago`;
+  if (tools.length > 0) {
+    const listed = tools.map(
+      (tool) =>
+        `${tool.name} (${tool.status} ${formatDuration(Math.max(0, now - tool.since))})`,
+    );
+    return `after its current tool calls finish: ${listed.join(", ")}`;
+  }
+  const finishes = "once its current model response finishes";
+  if (live === undefined) {
+    return progress.storedResponseStart === undefined
+      ? finishes
+      : `${finishes}; the response started ${ago(progress.storedResponseStart)}`;
+  }
+  const last =
+    live.lastProgressAt === undefined
+      ? ""
+      : ` and last produced output ${ago(live.lastProgressAt)}`;
+  switch (activityPhase(live, now)) {
+    case "retry":
+      return `${finishes}; it is waiting to retry a failed model request${live.retryAt === undefined ? "" : `, due in ${formatDuration(live.retryAt - now)}`}`;
+    case "between":
+      return `at its next step${live.lastProgressAt === undefined ? "" : `; its last activity was ${ago(live.lastProgressAt)}`}`;
+    default:
+      return live.responseStartedAt === undefined
+        ? `${finishes}${live.lastProgressAt === undefined ? "" : `; it last produced output ${ago(live.lastProgressAt)}`}`
+        : `${finishes}; the response started ${ago(live.responseStartedAt)}${last}`;
+  }
+}
+
+/** When the latest stored assistant message started, while it has not completed. */
+function openResponseStart(
+  messages: readonly SessionMessageInfo[],
+): number | undefined {
+  const latest = sinceCompaction(messages).assistants.at(-1);
+  if (latest === undefined || latest.time.completed !== undefined) {
+    return undefined;
+  }
+  return latest.time.created;
 }
 
 /**

@@ -327,9 +327,9 @@ export default OpenCodeDriver.use(
         contextPercentUsesContextLimit:
           Math.abs(Number(measured.reportedContextPercent) - 60.008) < 1e-9,
         defaultAutoThresholdUsesUsableWindow:
-          object(measured.defaultAutoCompactionThreshold).tokens === 170000 &&
-          object(measured.defaultAutoCompactionThreshold).percent === 85 &&
-          measured.autoCompactionThreshold === "unknown",
+          object(measured.autoCompactionEstimate).tokens === 170000 &&
+          object(measured.autoCompactionEstimate).percent === 85 &&
+          object(measured.autoCompactionEstimate).source === "default",
         normalStatusIsOneLineWithoutGeneralCaveats:
           measuredText.length > 0 &&
           !measuredText.includes("\n") &&
@@ -341,31 +341,33 @@ export default OpenCodeDriver.use(
           measuredText.includes("UI/context 60.01% of 250k"),
         structuredHeadroomIsSignedAgainstCurrentMeasurement:
           measured.inputHeadroomTokens === 49980 &&
-          measured.defaultAutoCompactionHeadroomTokens === 19980 &&
+          measured.autoCompactionHeadroomTokens === 19980 &&
           initial.inputHeadroomTokens === undefined &&
-          initial.defaultAutoCompactionHeadroomTokens === undefined,
+          initial.autoCompactionHeadroomTokens === undefined,
         normalTextShowsRemainingAndDefaultAutoDistance:
           millionText.includes("750k / 1M input (75%) · 250k remaining") &&
-          millionText.includes("default auto ~850k (100k away)") &&
+          millionText.includes(
+            "assumed default auto ~850k (100k away) · if compaction.buffer is set in OpenCode, set the plugin's compactionBuffer option to match",
+          ) &&
           !millionText.includes("UI/context") &&
           million.inputHeadroomTokens === 250000 &&
-          million.defaultAutoCompactionHeadroomTokens === 100000,
+          million.autoCompactionHeadroomTokens === 100000,
         overrunTextIsExplicit:
           overrun.inputHeadroomTokens === -10000 &&
-          overrun.defaultAutoCompactionHeadroomTokens === -40000 &&
+          overrun.autoCompactionHeadroomTokens === -40000 &&
           overrunText.includes("210k / 200k input (105%) · 10k over input window") &&
-          overrunText.includes("default auto ~170k (40k past estimate)") &&
+          overrunText.includes("assumed default auto ~170k (40k past estimate)") &&
           !/remaining|away/.test(overrunText),
         unknownDistanceIsOmitted:
           capturedToolResult(dir, "status_0")?.includes(
-            "default auto ~170k ·",
+            "assumed default auto ~170k ·",
           ) === true &&
           !/\((?:[\d.]+k) (?:away|past estimate)\)|remaining/.test(
             capturedToolResult(dir, "status_0") ?? "",
           ) &&
           switched.inputHeadroomTokens === undefined &&
-          switched.defaultAutoCompactionHeadroomTokens === undefined &&
-          switchedText.includes("default auto ~255k ·") &&
+          switched.autoCompactionHeadroomTokens === undefined &&
+          switchedText.includes("assumed default auto ~255k ·") &&
           !/away|past estimate|remaining/.test(switchedText),
         statusTextHasNoticeStartDefaultAutoTimeAndCompaction:
           initial.contextWarningPercent === 50 &&
@@ -376,7 +378,7 @@ export default OpenCodeDriver.use(
           measuredText.includes(
             "150k / 200k input (75.01%) · 50k remaining · UI/context 60.01% of 250k",
           ) &&
-          measuredText.includes("default auto ~170k (20k away)") &&
+          measuredText.includes("assumed default auto ~170k (20k away)") &&
           measuredText.includes(
             new Date(Number(object(measured.measurement).measuredAt))
               .toISOString()
@@ -392,11 +394,11 @@ export default OpenCodeDriver.use(
                 "Later messages and pending tool or subagent results, including this call, are not included in the measurement.",
               ) &&
               description.includes("signed token headroom") &&
-              description.includes("automatic compaction is enabled") &&
-              description.includes("default buffer and no override") &&
+              description.includes("assumes automatic compaction is on") &&
               description.includes(
-                "actual resolved automatic-compaction threshold is unavailable",
-              ),
+                "compactionBuffer option, set to mirror OpenCode's compaction.buffer",
+              ) &&
+              description.includes("otherwise assumes OpenCode's default buffer"),
           ),
         compactDescriptionExplainsCostOptionalNotesAndAdmission:
           compactDescriptions.size > 0 &&
@@ -442,16 +444,16 @@ export default OpenCodeDriver.use(
             undefined &&
           object(object(unknownCaller).output).reportedWindowPercent ===
             undefined &&
-          object(object(unknownCaller).output)
-            .defaultAutoCompactionThreshold === undefined,
+          object(object(unknownCaller).output).autoCompactionEstimate ===
+            undefined,
         missingContextKeepsInputPercentage:
           inputOnly.status === "available" &&
           object(inputOnly.limits).context === undefined &&
           inputOnly.reportedContextPercent === undefined &&
           inputOnly.usableInputWindow === 200000 &&
           inputOnly.reportedWindowPercent === 75.01 &&
-          object(inputOnly.defaultAutoCompactionThreshold).tokens === 170000 &&
-          object(inputOnly.defaultAutoCompactionThreshold).percent === 85,
+          object(inputOnly.autoCompactionEstimate).tokens === 170000 &&
+          object(inputOnly.autoCompactionEstimate).percent === 85,
         equalLimitsKeepBothStructuredPercentages:
           equalLimits.reportedContextPercent === 75.01 &&
           equalLimits.reportedWindowPercent === 75.01,
@@ -460,7 +462,7 @@ export default OpenCodeDriver.use(
           !equalLimitsText.includes("UI/context"),
         missingContextTextKeepsInputPercentage:
           inputOnlyText.includes("150k / 200k input (75.01%)") &&
-          inputOnlyText.includes("default auto ~170k (20k away)") &&
+          inputOnlyText.includes("assumed default auto ~170k (20k away)") &&
           inputOnly.inputHeadroomTokens === 49980 &&
           !inputOnlyText.includes("UI/context"),
         hookCallerIsPresent: readLog(dir)

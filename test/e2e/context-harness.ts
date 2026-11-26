@@ -72,18 +72,22 @@ export const noticeMessages = (history: readonly unknown[]) =>
   });
 
 const noticePlanningGuidance =
-  "Context planning update. The goal is to use roughly 90% of this input window for useful work. Continue while the next step and its expected output fit in the remaining window, narrowing large results when possible. Neither this notice nor the 90% mark alone is a reason to compact.";
+  "Context planning update. Continue while the next step and its expected output fit before the automatic-compaction point, leaving room for results not yet measured, and narrow large results when possible. This notice alone is not a reason to compact.";
 
 export const measurementScope =
   "Later messages and pending tool or subagent results are not included in this measurement.";
 
-/** `default auto ~170k (20k away)` or `(20k past estimate)` once the measurement passes it. */
-export const defaultAutoWithDistance =
-  / · default auto ~[\d.]+[kM]? \([\d.]+[kM]? (?:away|past estimate)\)/;
+/**
+ * `assumed default auto ~170k (20k away)`, or `configured auto ~…` with a `compactionBuffer`
+ * option, or `(20k past estimate)` once the measurement passes it.
+ */
+export const autoEstimateWithDistance =
+  / · (?:configured|assumed default) auto ~[\d.]+[kM]? \([\d.]+[kM]? (?:away|past estimate)\)/;
 
 /**
- * A notice is: measurement · default-auto estimate with distance · planning guidance · model and
- * epoch · measurement scope. Nothing outside the fixed guidance may nudge toward compaction.
+ * A notice is: measurement · automatic-compaction estimate with distance · planning guidance ·
+ * model and epoch · measurement scope. Nothing outside the fixed guidance may nudge toward
+ * compaction.
  */
 export const noticeHasPlanningGuidance = (text: unknown) => {
   if (typeof text !== "string") return false;
@@ -92,7 +96,7 @@ export const noticeHasPlanningGuidance = (text: unknown) => {
   const sections = body.split(` · ${noticePlanningGuidance} · `);
   return (
     sections.length === 2 &&
-    / · measured \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z(?: · default auto ~[\d.]+[kM]?(?: \([\d.]+[kM]? (?:away|past estimate)\))?)?$/.test(
+    / · measured \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z(?: · (?:configured|assumed default) auto ~[\d.]+[kM]?(?: \([\d.]+[kM]? (?:away|past estimate)\))?)?$/.test(
       sections[0] ?? "",
     ) &&
     !/Snapshot is stale|earlier under host|rebuilding cached/i.test(text) &&

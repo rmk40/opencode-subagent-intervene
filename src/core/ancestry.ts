@@ -284,6 +284,39 @@ async function walkSubtree(
   return truncated;
 }
 
+/**
+ * Every session below the caller down to `maxDepth` levels, breadth first, each once. Every listing
+ * pages oldest updated first, which never skips a session updated while the walk pages: the update
+ * moves it later, where the walk still reaches it, and only its first appearance is yielded. Reads
+ * happen only as sessions are pulled and hold nothing open in between, so a walk can be paused
+ * between pulls for as long as needed. No session cap applies; the caller bounds how much it pulls.
+ */
+export async function* walkDescendants(
+  reader: SessionReader,
+  callerID: SessionID,
+  maxDepth: number,
+): AsyncGenerator<Descendant, void, undefined> {
+  const seen = new Set<SessionID>([callerID]);
+  let parents: Array<{
+    readonly id: SessionID;
+    readonly depth: number;
+    readonly ancestors: readonly SessionID[];
+  }> = [{ id: callerID, depth: 0, ancestors: [] }];
+  for (let depth = 1; depth <= maxDepth && parents.length > 0; depth++) {
+    const next: typeof parents = [];
+    for (const parent of parents) {
+      for await (const info of listChildren(reader, parent.id)) {
+        if (seen.has(info.id)) continue;
+        seen.add(info.id);
+        const ancestors = [...parent.ancestors, parent.id];
+        yield { id: info.id, info, parentID: parent.id, depth, ancestors };
+        next.push({ id: info.id, depth, ancestors });
+      }
+    }
+    parents = next;
+  }
+}
+
 /** Deepest first, so every session comes before the session that launched it. Stable. */
 export function postOrder(nodes: readonly Descendant[]): Descendant[] {
   return nodes.toSorted((a, b) => b.depth - a.depth);

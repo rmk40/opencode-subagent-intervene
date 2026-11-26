@@ -15,7 +15,7 @@ import type {
 } from "@opencode/ai/route";
 
 const warning =
-  "160k / 200k input (80%) · 40k remaining · UI/context 64% of 250k · measured 2026-11-01T22:00:00Z · default auto ~170k (10k away) · Context planning update. The goal is to use roughly 90% of this input window for useful work. Continue while the next step and its expected output fit in the remaining window, narrowing large results when possible. Neither this notice nor the 90% mark alone is a reason to compact. · openai/gpt-5, initial context (no completed compaction) · Later messages and pending tool or subagent results are not included in this measurement.";
+  "160k / 200k input (80%) · 40k remaining · UI/context 64% of 250k · measured 2026-11-01T22:00:00Z · assumed default auto ~170k (10k away) · Context planning update. Continue while the next step and its expected output fit before the automatic-compaction point, leaving room for results not yet measured, and narrow large results when possible. This notice alone is not a reason to compact. · openai/gpt-5, initial context (no completed compaction) · Later messages and pending tool or subagent results are not included in this measurement.";
 const toolID = ToolCallID.make("call_read");
 const history = [
   Message.user("Review the source and continue with the next file."),

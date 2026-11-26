@@ -1,5 +1,7 @@
 // A person prompts a stopped subagent directly through the SDK. The prompt lifts the latch, carries
-// the stop note, and runs normally: the child calls a tool, answers, and is never interrupted.
+// the stop note, and runs normally: the child calls a tool, answers, and is never interrupted. The
+// plugin tells the parent nothing about that run. OpenCode 2.3 and later report every run of a
+// subagent that ends, so the parent then gets OpenCode's completed report carrying the answer.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Option, Stream } from "effect";
@@ -17,13 +19,16 @@ import {
   LIST_SUBTREE_CODE,
   listedLatches,
   notices,
+  onlyRunReports,
   pluginConsole,
   probePlugin,
   REPO_ROOT,
   readLlm,
   readLog,
   recordRequest,
+  reportBody,
   runDir,
+  runReports,
   takeCall,
   toolCallResponse,
   until,
@@ -142,7 +147,6 @@ export default OpenCodeDriver.use(
         ),
       );
       yield* Effect.sleep(1500);
-      const noticesBeforeUser = notices(dir, parent).length;
 
       // The person's prompt, sent to the stopped child through the SDK.
       const userAt = Date.now();
@@ -180,6 +184,15 @@ export default OpenCodeDriver.use(
       );
       const latches = listedLatches(codeModeValue(listText));
       const notePrefix = '<stopped-by-parent at="';
+      const reportsOfUserRun = runReports(
+        dir,
+        parent,
+        [child],
+        "completed",
+        userAt,
+        listAt,
+      );
+      const userRunReport = reportBody(dir, parent, child, "completed", userAt);
 
       const evidence = {
         dir,
@@ -200,6 +213,8 @@ export default OpenCodeDriver.use(
         })),
         latch: latches.get(child),
         parentNotices: notices(dir, parent).map((n) => n.metadata),
+        reportsOfUserRun,
+        userRunReport,
         plugin: pluginConsole(artifacts),
       };
 
@@ -229,7 +244,11 @@ export default OpenCodeDriver.use(
         ),
         answerPersisted: JSON.stringify(childContext).includes(ANSWER),
         latchLifted: latches.get(child) === "lifted",
-        noNoticeFromUserRun: notices(dir, parent).length === noticesBeforeUser,
+        // Only OpenCode's own report of the user's run may follow, and it carries the answer.
+        onlyHostReportOfUserRun:
+          onlyRunReports(reportsOfUserRun) &&
+          (reportsOfUserRun.byChild[child]?.reports === 0 ||
+            userRunReport === ANSWER),
         probeNeverEnforced: readLog(dir).every((r) => r.kind !== "enforce"),
       };
 

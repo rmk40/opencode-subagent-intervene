@@ -121,7 +121,7 @@ const run = (enabled: boolean) => {
                 warningText.includes(
                   "150k / 200k input (75.01%) · 50k remaining",
                 ) &&
-                warningText.includes("default auto ~170k (20k away)") &&
+                warningText.includes("assumed default auto ~170k (20k away)") &&
                 warningText.endsWith(` · ${measurementScope}`)
               : warnings.length === 0,
             durableWarningBytesUnchanged:

@@ -5,6 +5,7 @@ import {
   type ToolContext,
 } from "@opencode/plugin/promise/tool";
 import { Brand } from "effect";
+import { formatCount } from "@/core/errors";
 import { Latch } from "@/core/latch";
 import type {
   RunObservation,
@@ -61,6 +62,14 @@ class ScriptedRunState {
     const state = (script.length > 1 ? script.shift() : script[0]) ?? "idle";
     return { state, source: "event" };
   }
+
+  async observeAll(
+    sessionIDs: Iterable<SessionID>,
+  ): Promise<Map<SessionID, RunObservation>> {
+    const observed = new Map<SessionID, RunObservation>();
+    for (const id of sessionIDs) observed.set(id, await this.observe(id));
+    return observed;
+  }
 }
 
 /** The caller and the sessions below it. Stops go through a real `Latch` over an in-memory store. */
@@ -110,6 +119,7 @@ class World {
         messenger: this.messenger,
         latch: this.latch,
         runState: this.runState,
+        clock: this.clock,
         logger: this.logger,
       },
       options.latch === undefined ? {} : { latch: options.latch },
@@ -247,8 +257,8 @@ describe("the message limits", () => {
   test(`refuses ${MAX + 1} code points with the length and the cap, and sends nothing`, async () => {
     const world = new World().add("c1");
     const error = await world.refused("c1", "a".repeat(MAX + 1));
-    expect(error.message).toContain(String(MAX + 1));
-    expect(error.message).toContain(String(MAX));
+    expect(error.message).toContain(formatCount(MAX + 1));
+    expect(error.message).toContain(formatCount(MAX));
     expect(world.messenger.posts).toEqual([]);
   });
 
@@ -260,7 +270,7 @@ describe("the message limits", () => {
       "c1",
       "a".repeat(MAX - closing.length) + closing,
     );
-    expect(error.message).toContain(String(MAX + 1));
+    expect(error.message).toContain(formatCount(MAX + 1));
     expect(world.messenger.posts).toEqual([]);
   });
 });
@@ -344,10 +354,10 @@ describe("the result", () => {
       state: "running",
       activeTools: ["shell"],
       waitingOnPermission: false,
-      note: "It reads your message after its current tool calls finish: shell. Sending never interrupts; to redirect it right away, stop it with subagent_stop and continue it with subagent.",
+      note: "It reads your message after its current tool calls finish: shell (running 49m 59s). Sending never interrupts; to redirect it right away, stop it with subagent_stop and continue it with subagent.",
     });
     expect(content).toBe(
-      'Message sent to c1 (general, "Add CSV export"). It reads your message after its current tool calls finish: shell. Sending never interrupts; to redirect it right away, stop it with subagent_stop and continue it with subagent.',
+      'Message sent to c1 (general, "Add CSV export"). It reads your message after its current tool calls finish: shell (running 49m 59s). Sending never interrupts; to redirect it right away, stop it with subagent_stop and continue it with subagent.',
     );
   });
 

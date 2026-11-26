@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { errorMessage } from "@/core/errors";
+import { errorMessage, formatCount, overLimit } from "@/core/errors";
 import {
   PLUGIN_ID,
   type Clock,
@@ -9,7 +9,7 @@ import {
 } from "@/core/ports";
 
 export const NOTES_TOOL_NAME = "context_notes";
-export const NOTES_MAX_CODE_POINTS = 8000;
+export const NOTES_MAX_CODE_POINTS = 12_000;
 /** The one instruction entry key this plugin writes; never derived from tool input. */
 export const NOTES_ENTRY_KEY = `${PLUGIN_ID}.working-notes`;
 export const NOTES_KIND = "agent-working-notes";
@@ -88,9 +88,14 @@ export function parseNotesRequest(input: {
       throw new ContextNotesError("save requires notes. Nothing was saved.");
     }
     const length = codePoints(input.notes);
-    if (length < 1 || length > NOTES_MAX_CODE_POINTS) {
+    if (length < 1) {
       throw new ContextNotesError(
-        `notes must contain 1 to ${NOTES_MAX_CODE_POINTS} characters. Nothing was saved.`,
+        `notes are empty; save requires 1 to ${formatCount(NOTES_MAX_CODE_POINTS)} characters. Nothing was saved.`,
+      );
+    }
+    if (length > NOTES_MAX_CODE_POINTS) {
+      throw new ContextNotesError(
+        `notes are ${overLimit(length, NOTES_MAX_CODE_POINTS)}. Nothing was saved.`,
       );
     }
     return { action: "save", notes: input.notes };

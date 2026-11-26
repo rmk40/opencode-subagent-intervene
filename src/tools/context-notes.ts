@@ -9,14 +9,15 @@ import {
   type ContextNotesDeps,
   type NotesResult,
 } from "@/core/context-notes";
+import { formatCount } from "@/core/errors";
 
 export const NAME = NOTES_TOOL_NAME;
-export const DESCRIPTION = `Save, read or clear your own session's working notes without compacting. The latest saved notes stay in this session's context as agent-authored reference data, not instructions, and are kept through manual and automatic compaction until replaced or cleared. save replaces the previous notes with 1 to ${NOTES_MAX_CODE_POINTS} characters, stored exactly as given. read returns the current notes. clear removes the active entry and announces its removal at the next step. The cleared state persists through compaction, though earlier copies can remain in the baseline, history or summaries. Changes append context updates; earlier versions stay in history. Saving does not request compaction or start work. Independent of context_compact's handoff.`;
+export const DESCRIPTION = `Save, read or clear your own session's working notes without compacting. The latest saved notes stay in this session's context as agent-authored reference data, not instructions, and are kept through manual and automatic compaction until replaced or cleared. They go with every request, so keep them concise. save replaces the previous notes with 1 to ${formatCount(NOTES_MAX_CODE_POINTS)} characters, stored exactly as given. read returns the current notes. clear removes the active entry and announces its removal at the next step. The cleared state persists through compaction, though earlier copies can remain in the baseline, history or summaries. Changes append context updates; earlier versions stay in history. Saving does not request compaction or start work. Independent of context_compact's handoff.`;
 
 export const Input = Schema.Struct({
   action: Schema.Literals(["read", "save", "clear"]),
   notes: Schema.optionalKey(Schema.String).annotate({
-    description: `Required for save and rejected otherwise: 1 to ${NOTES_MAX_CODE_POINTS} characters that replace the current notes.`,
+    description: `Required for save and rejected otherwise: 1 to ${formatCount(NOTES_MAX_CODE_POINTS)} characters that replace the current notes.`,
   }),
 });
 

@@ -69,6 +69,7 @@ export interface SessionControl {
   /**
    * Resolves when the session has no active run; immediately when idle. Never starts work. The host
    * shares one outstanding call per session, because the underlying call cannot be cancelled.
+   * Rejects on hosts without the call.
    */
   waitIdle(sessionID: SessionID): Promise<void>;
 }
@@ -178,4 +179,9 @@ export type RunState = "running" | "idle" | "unknown";
 export interface RunObservation {
   readonly state: RunState;
   readonly source: "event" | "probe";
+  /**
+   * Set with an idle state when OpenCode reports the session idle but its last run recorded no
+   * end, so nothing will report that run as finished.
+   */
+  readonly noRecordedEnd?: true;
 }

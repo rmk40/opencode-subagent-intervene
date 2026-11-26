@@ -43,12 +43,14 @@ function firstPost(world: ContextWorld): SyntheticMessage {
 }
 
 function expectPlanningGuidance(text: string): void {
-  expect(text).toContain("Context planning update. The goal is to use roughly 90% of this input window for useful work.");
-  expect(text).toContain("Continue while the next step and its expected output fit in the remaining window, narrowing large results when possible.");
-  expect(text).toContain("Neither this notice nor the 90% mark alone is a reason to compact.");
+  expect(text).toContain("Context planning update. Continue while the next step and its expected output fit before the automatic-compaction point, leaving room for results not yet measured, and narrow large results when possible.");
+  expect(text).toContain("This notice alone is not a reason to compact.");
   expect(text.endsWith(" · Later messages and pending tool or subagent results are not included in this measurement.")).toBe(true);
   expect(text).not.toMatch(/stale|earl(?:y|ier)|unreliab|out of date|available tools?|tool availab/i);
   expect(text).not.toMatch(/heads-up|prepare|choose|stopping point|compact (now|at|before|immediately)|(?:must|should) compact|recheck|disregard|context_compact|context_status|auto ~?90%/i);
+  // No fixed utilization target, and the status tool's configuration hint stays out of notices.
+  expect(text).not.toMatch(/\bgoal\b|roughly \d+%|\d+% mark/i);
+  expect(text).not.toMatch(/compactionBuffer|compaction\.buffer/);
 }
 
 describe("context milestones", () => {
@@ -159,7 +161,7 @@ describe("context milestones", () => {
     expect(post.text).toContain(renderMeasurement(usage));
     expect(post.text).toContain("provider/model, initial context (no completed compaction)");
     expect(post.text).toContain("96 / 100 input (96%) · 4 remaining");
-    expect(post.text).toContain("default auto ~85 (11 past estimate)");
+    expect(post.text).toContain("assumed default auto ~85 (11 past estimate)");
     expect(post.text).toContain(usage.measurementScope);
     expectPlanningGuidance(post.text);
     expect(post.description).toBe("Context usage reached the 95% milestone");
@@ -179,14 +181,13 @@ describe("context milestones", () => {
 
   test("omits an unknown default-auto estimate without inventing an effective threshold", () => {
     const usage = selectContextUsage({ sessionID: SESSION, messageID: CURRENT, messages: [measured(), current()], models: [catalogModel()] });
-    const { defaultAutoCompactionThreshold: _estimate, ...withoutEstimate } = usage;
+    const { autoCompactionEstimate: _estimate, ...withoutEstimate } = usage;
     const before = structuredClone(withoutEstimate);
     const rendered = renderContextWarning(withoutEstimate);
     expect(rendered).toContain(renderMeasurement(usage));
     expect(rendered).not.toContain("auto ~");
     expect(rendered).not.toMatch(/away|past estimate/);
     expect(rendered).toContain("provider/model, initial context (no completed compaction)");
-    expect(withoutEstimate.autoCompactionThreshold).toBe("unknown");
     expectPlanningGuidance(rendered);
     expect(withoutEstimate).toEqual(before);
   });
@@ -248,7 +249,7 @@ describe("planning notices and configured schedules", () => {
       description: `Context usage reached the ${input}% milestone`,
       metadata: { threshold: "50", milestone: String(input), measurementID: "msg_snapshot", epoch: "initial" },
     });
-    expect(post.text).toContain(`${input} / 100 input (${input}%) · ${remaining} · UI/context ${input / 2}% of 200 · measured 2026-11-01T22:28:00Z · default auto ~85 (${distance})`);
+    expect(post.text).toContain(`${input} / 100 input (${input}%) · ${remaining} · UI/context ${input / 2}% of 200 · measured 2026-11-01T22:28:00Z · assumed default auto ~85 (${distance})`);
     expect(post.text).toContain("provider/model, initial context (no completed compaction) · Later messages and pending tool or subagent results are not included in this measurement.");
     expectPlanningGuidance(post.text);
   });
@@ -279,8 +280,23 @@ describe("planning notices and configured schedules", () => {
     world.models.catalogs.set("/work", [catalogModel({ context: 64_000, input: 64_000, output: 1000 })]);
     await new ContextNotices(world).afterTool(EVENT);
     expect(firstPost(world).text).toContain("51.2k / 64k input (80%) · 12.8k remaining · measured");
-    expect(firstPost(world).text).toContain("default auto ~48k (3.2k past estimate)");
+    expect(firstPost(world).text).toContain("assumed default auto ~48k (3.2k past estimate)");
     expectPlanningGuidance(firstPost(world).text);
+  });
+
+  test.each([
+    { buffer: "10%", estimate: "configured auto ~900k (49.7k away)" },
+    { buffer: 50_000, estimate: "configured auto ~950k (99.7k away)" },
+  ])("reports the estimate from a configured buffer of $buffer without the status hint", async ({ buffer, estimate }) => {
+    const world = new ContextWorld([measured("msg_configured", tokens({ input: 850_300 })), current()]);
+    world.models.catalogs.set("/work", [catalogModel({ context: 1_000_000, input: 1_000_000, output: 10_000 })]);
+    await new ContextNotices(world, { compactionBuffer: buffer }).afterTool(EVENT);
+    expect(world.messenger.posts).toHaveLength(1);
+    const post = firstPost(world);
+    expect(post.metadata["milestone"]).toBe("85");
+    expect(post.text).toContain(`850.3k / 1M input (85.03%) · 149.7k remaining · measured 1970-01-01T00:00:00Z · ${estimate} · Context planning update.`);
+    expect(post.text).not.toContain("assumed default");
+    expectPlanningGuidance(post.text);
   });
 
   test("delivers the default schedule once across reloads without replacing older snapshots", async () => {

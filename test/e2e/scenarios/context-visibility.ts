@@ -8,6 +8,7 @@ import {
   instanceFor,
   readLlm,
   recordRequest,
+  reportBody,
   runDir,
   until,
   waitIdle,
@@ -52,6 +53,9 @@ const run = (
           if (req.role === "parent") {
             if (req.last.role === "tool")
               return Stream.make(Llm.text("PARENT-FINAL"));
+            // Where every subagent runs in the background, each child's report wakes the parent.
+            if (!req.last.text.includes("ROLE<parent>"))
+              return Stream.make(Llm.text("PARENT-NOTED"));
             return Stream.make(
               Llm.toolCall({
                 index: 0,
@@ -126,10 +130,39 @@ const run = (
             30000,
           ),
         );
+        // OpenCode 2.3 and later run every subagent in the background, whatever the call asks, so
+        // the call returns at once and the child's final answer reaches the parent in OpenCode's
+        // completed report instead of the call's result.
+        const finalAnswer = (role: string) => {
+          const result = capturedToolResult(dir, role);
+          if (result?.includes(`FINAL-${role}-`) === true) return result;
+          const childID = readLlm(dir).find(
+            (item) => item.role === role,
+          )?.sessionID;
+          return childID === undefined
+            ? undefined
+            : reportBody(dir, parent.id, childID, "completed", 0);
+        };
+        const answers = yield* Effect.promise(() =>
+          until(
+            "both final answers",
+            () => {
+              const general = finalAnswer("general");
+              const explore = finalAnswer("explore");
+              return general !== undefined && explore !== undefined
+                ? { general, explore }
+                : undefined;
+            },
+            30000,
+          ).catch(() => ({
+            general: finalAnswer("general"),
+            explore: finalAnswer("explore"),
+          })),
+        );
         yield* Effect.promise(() => waitIdle(instance, parent.id));
         const log = readLlm(dir);
         const checks: Record<string, boolean> = {};
-        for (const role of ["general", "explore"]) {
+        for (const role of ["general", "explore"] as const) {
           const requests = log.filter((item) => item.role === role);
           const first = requests[0];
           const visible = role === "general" || allowExplore;
@@ -144,8 +177,7 @@ const run = (
           checks[`${role}:expectedStepsOnly`] =
             requests.length === (visible ? 2 : 1);
           checks[`${role}:finalResultNotReplaced`] =
-            capturedToolResult(dir, role)?.includes(`FINAL-${role}-180K`) ===
-            true;
+            answers[role]?.includes(`FINAL-${role}-180K`) === true;
           checks[`${role}:codeModeSelection`] =
             first?.tools.includes("execute") ===
             (codeMode && role === "general");

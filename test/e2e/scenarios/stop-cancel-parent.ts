@@ -24,6 +24,7 @@ import {
   forSession,
   instanceFor,
   LIST_SUBTREE_CODE,
+  type LogRecord,
   listedLatches,
   pluginConsole,
   probePlugin,
@@ -311,6 +312,36 @@ export default OpenCodeDriver.use(
         ...latched.flatMap((id) => interruptsOf(id).slice(1)),
         ...interruptsOf(late),
       ];
+      // A run that starts in a walked session after the stop's interrupt ended its run was started
+      // by a notice, and the latch interrupts it within 500 ms. Before OpenCode 2.3, its subagents'
+      // cancelled notices reach the hub before the stop interrupts it, and that interrupt clears
+      // their wake. From 2.3 they arrive while its stopped run winds down, so a run starts there
+      // right after it, and the latch stops that one too.
+      const latchStoppedWokenRun = (stop: LogRecord) => {
+        const sessionID = stop.sessionID ?? "";
+        const stopInterrupt = interruptsOf(sessionID)[0]?.at ?? Infinity;
+        return forSession(typed, sessionID).some(
+          (start) =>
+            start.type === "session.execution.started" &&
+            start.at >= stopInterrupt &&
+            start.at <= stop.at &&
+            stop.at - start.at < 500,
+        );
+      };
+      const stopError = (() => {
+        try {
+          const value: unknown = JSON.parse(stopResult ?? "");
+          const error =
+            typeof value === "object" && value !== null && "error" in value
+              ? value.error
+              : undefined;
+          return typeof error === "object" && error !== null
+            ? (error as { readonly type?: unknown; readonly message?: unknown })
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
 
       const evidence = {
         dir,
@@ -352,8 +383,14 @@ export default OpenCodeDriver.use(
 
       const checks = {
         parentInterrupted: cancelTimes !== undefined,
+        // OpenCode that ends a cancelled call itself records it as aborted. OpenCode that lets a
+        // tool settle after a stop reports the error the stop ends with.
         stopCallAborted:
-          stopResult !== undefined && stopResult.includes('"aborted"'),
+          stopError?.type === "aborted" ||
+          (typeof stopError?.message === "string" &&
+            stopError.message.startsWith(
+              "The stop was cancelled before it finished.",
+            )),
         cancelledWhileSettling: stage === "settle",
         walkedSessionsInterrupted: latched.every(
           (id) => (interruptsOf(id)[0]?.at ?? Infinity) < releaseAt,
@@ -368,14 +405,15 @@ export default OpenCodeDriver.use(
         lateSubagentRanOn: lateBusyBeforeRelease,
         lateSubagentFinishedNormally:
           JSON.stringify(lateContext).includes("LATE-DONE"),
-        // Between the cancellation and the late subagent's release, nothing is interrupted; after
-        // the release, only the hub's run that the late subagent's notice starts, by the latch.
+        // The stop interrupts nothing after the cancellation. The only interrupts after it are the
+        // latch's, of hub runs that notices start: the late subagent's after its release, and from
+        // OpenCode 2.3 also the hub's subagents' cancelled notices.
         noInterruptAfterCancel: interruptsAfterCancel.every(
-          (e) => e.at >= releaseAt && e.sessionID === hub,
+          (e) => e.sessionID === hub && latchStoppedWokenRun(e),
         ),
         latchStoppedTheWokenHub:
-          interruptsAfterCancel.length === 0 ||
-          latchInterrupts.some((line) => line.includes(hub)),
+          latchInterrupts.filter((line) => line.includes(hub)).length >=
+          interruptsAfterCancel.length,
         probeNeverEnforced: readLog(dir).every((r) => r.kind !== "enforce"),
       };
 

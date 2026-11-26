@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { errorMessage } from "@/core/errors";
+import { errorMessage, formatCount, overLimit } from "@/core/errors";
 import {
   PLUGIN_ID,
   type CompactionAdmission,
@@ -9,7 +9,7 @@ import {
 } from "@/core/ports";
 
 export const COMPACT_TOOL_NAME = "context_compact";
-export const HANDOFF_MAX_CODE_POINTS = 8000;
+export const HANDOFF_MAX_CODE_POINTS = 16_000;
 export const HANDOFF_KIND = "context-handoff";
 const SELF_COMPACTION_PREFIX = `msg_${PLUGIN_ID}_self_compaction_`;
 
@@ -49,9 +49,14 @@ export async function requestSelfCompaction(
 ): Promise<SelfCompactionResult> {
   if (handoff !== undefined) {
     const length = [...handoff].length;
-    if (length < 1 || length > HANDOFF_MAX_CODE_POINTS) {
+    if (length < 1) {
       throw new CompactionError(
-        `handoff must contain 1 to ${HANDOFF_MAX_CODE_POINTS} characters. Nothing was requested.`,
+        `handoff is empty; pass 1 to ${formatCount(HANDOFF_MAX_CODE_POINTS)} characters or omit it. Nothing was requested.`,
+      );
+    }
+    if (length > HANDOFF_MAX_CODE_POINTS) {
+      throw new CompactionError(
+        `handoff is ${overLimit(length, HANDOFF_MAX_CODE_POINTS)}. Nothing was requested.`,
       );
     }
   }

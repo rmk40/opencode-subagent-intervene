@@ -3,8 +3,9 @@ import { COMPACT_TOOL_NAME } from "@/core/compaction";
 import {
   DEFAULT_CONTEXT_WARNING_PERCENT,
   readContextUsage,
-  renderDefaultAutoCompaction,
+  renderAutoCompactionEstimate,
   renderMeasurement,
+  type CompactionBuffer,
   type ContextUsage,
   type ContextUsageDeps,
 } from "@/core/context-usage";
@@ -25,6 +26,7 @@ export interface ContextNoticeDeps extends ContextUsageDeps {
 
 export interface ContextNoticeOptions {
   readonly warningPercent?: number;
+  readonly compactionBuffer?: CompactionBuffer;
 }
 
 export interface ContextToolCompletion {
@@ -82,9 +84,10 @@ export class ContextNotices {
   private async evaluate(event: ContextToolCompletion): Promise<void> {
     const threshold =
       this.options.warningPercent ?? DEFAULT_CONTEXT_WARNING_PERCENT;
-    const { session, messages, usage } = await readContextUsage(
-      this.deps, event, threshold,
-    );
+    const { session, messages, usage } = await readContextUsage(this.deps, event, {
+      warningPercent: threshold,
+      compactionBuffer: this.options.compactionBuffer,
+    });
     if (
       this.disposed || session.revert !== undefined ||
       usage.status !== "available" || usage.model === undefined
@@ -196,10 +199,10 @@ export function renderContextWarning(usage: ContextUsage): string {
     ? "model unknown" : `${usage.model.providerID}/${usage.model.id}`;
   return [
     renderMeasurement(usage),
-    ...renderDefaultAutoCompaction(usage),
-    "Context planning update. The goal is to use roughly 90% of this input window for useful work. " +
-      "Continue while the next step and its expected output fit in the remaining window, narrowing large results when possible. " +
-      "Neither this notice nor the 90% mark alone is a reason to compact.",
+    ...renderAutoCompactionEstimate(usage),
+    "Context planning update. " +
+      "Continue while the next step and its expected output fit before the automatic-compaction point, leaving room for results not yet measured, and narrow large results when possible. " +
+      "This notice alone is not a reason to compact.",
     `${model}, ${epoch}`,
     usage.measurementScope,
   ].join(" · ");

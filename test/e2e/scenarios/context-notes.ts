@@ -150,12 +150,16 @@ export default OpenCodeDriver.use(
               sessionIDs: [child],
               reason: "notes stop check",
             });
-          return toolCallResponse("parent_launch", "subagent", {
-            agent: "general",
-            prompt: "ROLE<child> wait",
-            description: "notes stop probe",
-            background: true,
-          });
+          if (req.last.text.includes("ROLE<parent>"))
+            return toolCallResponse("parent_launch", "subagent", {
+              agent: "general",
+              prompt: "ROLE<child> wait",
+              description: "notes stop probe",
+              background: true,
+            });
+          // OpenCode's reports about the child wake the parent. Launching again here would start a
+          // child per report, and each new child's report would wake the parent once more.
+          return Stream.make(Llm.text("PARENT-NOTED"));
         }
         if (req.role === "child") {
           if (req.last.text.includes("CMD-HOLD"))
@@ -325,9 +329,13 @@ export default OpenCodeDriver.use(
       yield* prompt(A, "NOTES-SAVE-2");
       const saved2 = structuredResult(dir, "notes_save_2");
       const afterSave2 = firstAfter(A, "after:notes_save_2", -1);
-      yield* prompt(A, "SEED-AUTO");
+      // The window starts before the seed. OpenCode before 2.4 sends the summary request once the
+      // next prompt finds the session past the threshold. From 2.4 it starts writing the summary in
+      // the background as the seeding run ends, so the request can come before the session reads
+      // idle, and the next prompt swaps the held summary in.
       const beforeAuto = lastIndex();
       const epochBeforeAuto = latestCompaction(yield* history(A))?.id;
+      yield* prompt(A, "SEED-AUTO");
       yield* prompt(A, "CONTINUE-AUTO");
       const autoSummary = summaryAfter(A, beforeAuto);
       const afterAuto = continuationAfter(A, beforeAuto);
@@ -418,7 +426,7 @@ export default OpenCodeDriver.use(
         .list({ sessionID: idle.id as InboxInput["sessionID"] })
         .pipe(Effect.orDie);
       const idleRead = yield* runNotes(idle.id, { action: "read" });
-      const maxNotes = "🙂".repeat(8000);
+      const maxNotes = "🙂".repeat(12000);
       const atLimit = yield* runNotes(idle.id, { action: "save", notes: maxNotes });
       const readAtLimit = yield* runNotes(idle.id, { action: "read" });
       const overLimit = yield* runNotes(idle.id, {
@@ -684,11 +692,13 @@ export default OpenCodeDriver.use(
           output(idleRead).revision === output(idleSave).revision,
         limitCountsCodePoints:
           output(atLimit).status === "saved" &&
-          output(atLimit).codePoints === 8000 &&
+          output(atLimit).codePoints === 12000 &&
           output(readAtLimit).notes === maxNotes,
         invalidInputChangesNothing:
           !overLimit.ok &&
-          /1 to 8000/.test(errorText(overLimit)) &&
+          /notes are 12,001 characters; the limit is 12,000 \(1 over\)/.test(
+            errorText(overLimit),
+          ) &&
           !emptyNotes.ok &&
           !readWithNotes.ok &&
           output(readAfterRejects).revision === output(atLimit).revision,
@@ -736,6 +746,12 @@ export default OpenCodeDriver.use(
             })),
           })),
           epochPairs,
+          autoWindow: {
+            beforeAuto,
+            epochBeforeAuto,
+            summaryIndex: autoSummary?.index,
+            continuationIndex: afterAuto?.index,
+          },
           autoCompaction,
           immediateSave,
           immediateEffective: effectiveNotes(afterImmediate?.body),

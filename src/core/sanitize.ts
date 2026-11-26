@@ -1,7 +1,8 @@
 // Text written by a model or taken from session data is cleaned before another model reads it in
-// markup. Stop reasons and the values notices quote become one line of escaped text. Parent
-// messages are instructions whose layout matters, so they keep their lines and characters and only
-// lose what could hide text or close their wrapper.
+// markup. Stop reasons and the values notices quote become one line of escaped text: element text
+// escapes only what could start markup or an entity, and attribute values also escape quotes and
+// `>`. Parent messages are instructions whose layout matters, so they keep their lines and
+// characters and only lose what could hide text or close their wrapper.
 
 export const REASON_MAX_CODE_POINTS = 500;
 
@@ -28,13 +29,26 @@ const LINE_ENDINGS = /\r\n?/g;
 const BLOCK_CONTROLS = /(?![\t\n])[\p{Cc}\p{Cf}\p{Cs}]/gu;
 const REGEXP_SYNTAX = /[.*+?^${}()|[\]\\]/g;
 
-const ESCAPES: Readonly<Record<string, string>> = {
+/**
+ * `text` is for element content, where only `&` and `<` can start markup or an entity, so quotes
+ * stay readable. `attribute` is for a double-quoted attribute value and escapes the full set.
+ */
+export type EscapeMode = "text" | "attribute";
+
+const TEXT_ESCAPES: Readonly<Record<string, string>> = {
   "&": "&amp;",
   "<": "&lt;",
+};
+
+const ATTRIBUTE_ESCAPES: Readonly<Record<string, string>> = {
+  ...TEXT_ESCAPES,
   ">": "&gt;",
   '"': "&quot;",
   "'": "&#39;",
 };
+
+const ESCAPES: Readonly<Record<EscapeMode, Readonly<Record<string, string>>>> =
+  { text: TEXT_ESCAPES, attribute: ATTRIBUTE_ESCAPES };
 
 export interface SanitizedText {
   /** Empty when no visible text remains. */
@@ -44,13 +58,16 @@ export interface SanitizedText {
 }
 
 /**
- * Strips control and format characters, collapses whitespace to single spaces, escapes
- * `& < > " '`, and caps the escaped result at `maxCodePoints` without splitting an entity.
+ * Strips control and format characters, collapses whitespace to single spaces, escapes `&` and
+ * `<` (and `> " '` too in `attribute` mode), and caps the escaped result at `maxCodePoints`
+ * without splitting an entity.
  */
 export function sanitizeText(
   raw: string,
   maxCodePoints: number,
+  mode: EscapeMode,
 ): SanitizedText {
+  const escapes = ESCAPES[mode];
   const collapsed = raw
     .replace(SEPARATING_CONTROLS, " ")
     .replace(CONTROLS, "")
@@ -61,7 +78,7 @@ export function sanitizeText(
   let codePoints = 0;
   let cut = false;
   for (const char of collapsed) {
-    const entity = ESCAPES[char];
+    const entity = escapes[char];
     // Entities are ASCII, so their string length is their code point count.
     const width = entity === undefined ? 1 : entity.length;
     if (codePoints + width > maxCodePoints) {
@@ -97,11 +114,12 @@ export function sanitizeBlock(raw: string, wrapper: string): string {
 }
 
 /**
- * `sanitizeText` capped at 500 code points. Throws `EmptyReasonError` when no visible text
+ * `sanitizeText` for element text, capped at 500 code points: the reason becomes the body of the
+ * stop note and is quoted in plain-text results. Throws `EmptyReasonError` when no visible text
  * remains.
  */
 export function sanitizeReason(raw: string): string {
-  const { text } = sanitizeText(raw, REASON_MAX_CODE_POINTS);
+  const { text } = sanitizeText(raw, REASON_MAX_CODE_POINTS, "text");
   if (text === "") throw new EmptyReasonError();
   return text;
 }

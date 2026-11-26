@@ -6,8 +6,9 @@
 // - subagent_stop fails with the same message for a malformed and for an unknown session ID;
 // - subagent_stop stops a background child that holds a shell: the shell observes the interrupt,
 //   the result says stopped, and the parent gets exactly one cancelled notice;
-// - a synthetic wake of the stopped child is interrupted by the latch, with no reply persisted
-//   and no further notice to the parent;
+// - a synthetic wake of the stopped child is interrupted by the latch, with no reply persisted,
+//   and the parent hears of it at most through OpenCode's cancelled report of that run, which
+//   OpenCode 2.3 and later send;
 // - list and inspect report the stop through Code Mode, with its reason escaped.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,12 +22,14 @@ import {
   instanceFor,
   type JsonValue,
   notices,
+  onlyRunReports,
   probePlugin,
   REPO_ROOT,
   readLlm,
   readLog,
   recordRequest,
   runDir,
+  runReports,
   until,
   waitEvent,
   writeLine,
@@ -229,6 +232,13 @@ export default OpenCodeDriver.use(
         sessionID: child,
       });
       const noticesAfterWake = notices(dir, parent);
+      const reportsAfterWake = runReports(
+        dir,
+        parent,
+        [child],
+        "cancelled",
+        wakeAt,
+      );
 
       // list and inspect through Code Mode.
       const inspectAt = Date.now();
@@ -284,6 +294,7 @@ export default OpenCodeDriver.use(
             (r) => r.sessionID === child && r.at >= wakeAt,
           ).length,
           parentNoticesAfterWake: noticesAfterWake.map((n) => n.metadata),
+          reportsAfterWake,
         },
         execResult: execText,
       };
@@ -314,12 +325,12 @@ export default OpenCodeDriver.use(
         // script never writes, so every re-interrupt here is the subagent-intervene latch.
         probeNeverEnforced: readLog(dir).every((r) => r.kind !== "enforce"),
         noWokenReply: !evidence.wake.wokenReplyPersisted,
-        noNoticeAfterWake: noticesAfterWake.length === noticesAfterStop.length,
+        parentHeardOnlyRunReport: onlyRunReports(reportsAfterWake),
         listReportsStop:
           execJson.includes(child) && execJson.includes('"latch":"active"'),
         inspectRan: execJson.includes('"scope":"since-last-compaction"'),
         reasonEscaped:
-          execJson.includes("&lt;/subagent&gt;") &&
+          execJson.includes("&lt;/subagent>") &&
           !execJson.includes("</subagent>"),
       };
 

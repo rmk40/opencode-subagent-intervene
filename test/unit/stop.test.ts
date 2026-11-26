@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Error as ToolError } from "@opencode/plugin/promise/tool";
 import {
   MAX_SCAN_SESSIONS,
   MAX_SUBTREE_DEPTH,
@@ -31,6 +32,7 @@ import {
   type StopRequest,
   stopSubagents,
 } from "@/core/stop";
+import { CANCELLED_MESSAGE, stopTool } from "@/tools/stop";
 import {
   FakeClock,
   FakeControl,
@@ -40,6 +42,7 @@ import {
   RecordingLogger,
   sessionInfo,
 } from "./fixtures";
+import { toolContext } from "./tool-world";
 
 const CALLER = "caller";
 /** The generation of the stop under test. It names every key the stop writes. */
@@ -779,7 +782,7 @@ describe("writes and interrupts", () => {
     await world.run({ sessionIDs: ["c1"], reason: "  off\n<track>  " });
     expect(world.store.data.get("latch/c1/gen")).toEqual({
       parentSessionID: CALLER,
-      reason: "off &lt;track&gt;",
+      reason: "off &lt;track>",
       at: START,
       expiresAt: START + LATCH_TTL_MS,
     });
@@ -1161,5 +1164,43 @@ describe("cancellation", () => {
     await world.run({ sessionIDs: ["c1"] });
     expect(world.elapsed()).toBe(0);
     expect(world.clock.pendingTimers).toBe(0);
+  });
+});
+
+describe("the subagent_stop tool", () => {
+  /** Calls the tool the way OpenCode does, with the world's abort signal as the call's. */
+  function callTool(world: World, sessionIDs: string[]) {
+    return drive(
+      world.clock,
+      stopTool(world.deps(), { settleMs: SETTLE_MS }).execute(
+        { sessionIDs, reason: REASON },
+        toolContext("stop", world.controller.signal, CALLER),
+      ),
+    );
+  }
+
+  test("rejects with the cancelled message when the call is aborted partway, saying some may already be stopped", async () => {
+    const world = busyTree();
+    world.onPoint = (reached) => {
+      if (reached === "interrupt g1") world.controller.abort();
+    };
+    const error = await rejection(callTool(world, ["c1"]));
+    expect(error).toBeInstanceOf(ToolError);
+    expect(error.message).toBe(CANCELLED_MESSAGE);
+    expect(CANCELLED_MESSAGE).toContain("may already be stopped");
+    expect(CANCELLED_MESSAGE).toContain("subagents.list");
+    // The stops recorded before the abort stay in place, as the message warns.
+    expect(await world.latch.isActive("c1")).toBe(true);
+  });
+
+  test("ends its rendered result with the note that notices about the stopped subagents can keep arriving", async () => {
+    const world = new World().add("c1", { state: "running" });
+    const result = await callTool(world, ["c1"]);
+    expect(typeof result.content === "string" && result.content.split("\n")).toEqual([
+      "- c1: stopped",
+      "",
+      STOPPED_NOTE,
+    ]);
+    expect(STOPPED_NOTE).toContain("including later ones while they stay stopped");
   });
 });

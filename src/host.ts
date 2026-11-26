@@ -1,6 +1,8 @@
 // Adapters from the plugin context to the ports the core modules use. Plugin domain methods ignore
 // abort signals, so nothing here takes one, and the one call that can stay pending indefinitely,
-// `session.wait`, is shared per session instead of repeated.
+// `session.wait`, is shared per session instead of repeated. From OpenCode 2.4, `session.wait` and
+// `session.instructions` belong to the host's experimental session API, which can change within
+// the supported range, so they are only used here and `wait` is checked for before use.
 
 import type { Plugin } from "@opencode/plugin";
 import {
@@ -41,6 +43,11 @@ export interface Host {
   readonly scheduler: Scheduler;
   readonly logger: Logger;
   /**
+   * Whether the host offers `session.wait`. Without it, `control.waitIdle` rejects, so probes
+   * report unknown.
+   */
+  readonly waitAvailable: boolean;
+  /**
    * Asks for the `subagent_stop` permission on one root agent. Resolves when allowed; a deny rule
    * or a refusal rejects, and the rejection must propagate out of the tool.
    */
@@ -48,6 +55,12 @@ export interface Host {
 }
 
 export function createHost(ctx: Plugin.Context, logger: Logger): Host {
+  const waitAvailable = typeof ctx.session.wait === "function";
+  if (!waitAvailable) {
+    logger.warn(
+      "this OpenCode has no session.wait: run state that no event has shown is reported as unknown, and stall notices and run-state reconciliation are off",
+    );
+  }
   return {
     reader: sessionReader(ctx),
     models: {
@@ -61,7 +74,7 @@ export function createHost(ctx: Plugin.Context, logger: Logger): Host {
         return { id: item.id, delivery: item.delivery };
       },
     },
-    control: sessionControl(ctx),
+    control: sessionControl(ctx, waitAvailable),
     permissions: {
       async pendingRequestIDs(sessionID) {
         const requests = await ctx.permission.list({ sessionID });
@@ -78,6 +91,7 @@ export function createHost(ctx: Plugin.Context, logger: Logger): Host {
     clock: systemClock,
     scheduler: unrefScheduler,
     logger,
+    waitAvailable,
     assertStop: (request) =>
       ctx.permission.assert({
         action: STOP_PERMISSION,
@@ -153,7 +167,10 @@ function isMissingSession(error: unknown): boolean {
   );
 }
 
-function sessionControl(ctx: Plugin.Context): SessionControl {
+function sessionControl(
+  ctx: Plugin.Context,
+  waitAvailable: boolean,
+): SessionControl {
   const waits = new Map<SessionID, Promise<void>>();
   return {
     async interrupt(sessionID) {
@@ -161,6 +178,9 @@ function sessionControl(ctx: Plugin.Context): SessionControl {
       return result.interrupted;
     },
     waitIdle(sessionID) {
+      if (!waitAvailable) {
+        return Promise.reject(new Error("session.wait is not available"));
+      }
       const pending = waits.get(sessionID);
       if (pending !== undefined) return pending;
       const wait: Promise<void> = ctx.session

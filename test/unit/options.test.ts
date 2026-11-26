@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_SETTINGS,
   MAX_PROMPT_NOTICE_SECONDS,
+  MAX_STALL_NOTICE_MINUTES,
   parseOptions,
 } from "@/index";
 import { RecordingLogger } from "./fixtures";
@@ -25,6 +26,7 @@ describe("parseOptions", () => {
       settleMs: 4000,
       promptNotices: true,
       promptNoticeSeconds: 60,
+      stallNoticeMinutes: 10,
       contextNotices: true,
       selfCompaction: true,
       contextWarningPercent: 50,
@@ -44,6 +46,10 @@ describe("parseOptions", () => {
     ["promptNoticeSeconds", 0],
     ["promptNoticeSeconds", 1.5],
     ["promptNoticeSeconds", MAX_PROMPT_NOTICE_SECONDS],
+    ["stallNoticeMinutes", 0],
+    ["stallNoticeMinutes", 2.5],
+    ["stallNoticeMinutes", 15],
+    ["stallNoticeMinutes", MAX_STALL_NOTICE_MINUTES],
     ["contextNotices", false],
     ["contextNotices", true],
     ["selfCompaction", false],
@@ -53,6 +59,15 @@ describe("parseOptions", () => {
     ["contextWarningPercent", 70],
     ["contextWarningPercent", 75.5],
     ["contextWarningPercent", 99.99],
+    ["compactionBuffer", "1%"],
+    ["compactionBuffer", "10%"],
+    ["compactionBuffer", "12.5%"],
+    ["compactionBuffer", "5.0%"],
+    ["compactionBuffer", "99%"],
+    ["compactionBuffer", "99.99%"],
+    ["compactionBuffer", 0],
+    ["compactionBuffer", 16_000],
+    ["compactionBuffer", Number.MAX_SAFE_INTEGER],
   ];
 
   test.each(VALID)(
@@ -84,6 +99,12 @@ describe("parseOptions", () => {
     ["promptNoticeSeconds", "60"],
     ["promptNoticeSeconds", Number.POSITIVE_INFINITY],
     ["promptNoticeSeconds", Number.NaN],
+    ["stallNoticeMinutes", -1],
+    ["stallNoticeMinutes", MAX_STALL_NOTICE_MINUTES + 1],
+    ["stallNoticeMinutes", "10"],
+    ["stallNoticeMinutes", null],
+    ["stallNoticeMinutes", Number.POSITIVE_INFINITY],
+    ["stallNoticeMinutes", Number.NaN],
     ["contextNotices", "false"],
     ["contextNotices", 0],
     ["selfCompaction", "true"],
@@ -95,6 +116,27 @@ describe("parseOptions", () => {
     ["contextWarningPercent", "70"],
     ["contextWarningPercent", Number.POSITIVE_INFINITY],
     ["contextWarningPercent", Number.NaN],
+    // Percentage strings outside OpenCode's `^([1-9]\d?(\.\d+)?)%$` pattern.
+    ["compactionBuffer", "0%"],
+    ["compactionBuffer", "0.5%"],
+    ["compactionBuffer", "01%"],
+    ["compactionBuffer", "100%"],
+    ["compactionBuffer", "1.%"],
+    ["compactionBuffer", ".5%"],
+    ["compactionBuffer", "-10%"],
+    ["compactionBuffer", "10"],
+    ["compactionBuffer", "10 %"],
+    ["compactionBuffer", " 10%"],
+    ["compactionBuffer", "10%\n"],
+    ["compactionBuffer", ""],
+    // Token counts that are not non-negative safe integers.
+    ["compactionBuffer", -1],
+    ["compactionBuffer", 1.5],
+    ["compactionBuffer", Number.MAX_SAFE_INTEGER + 1],
+    ["compactionBuffer", Number.POSITIVE_INFINITY],
+    ["compactionBuffer", Number.NaN],
+    ["compactionBuffer", null],
+    ["compactionBuffer", true],
   ];
 
   test.each(INVALID)(

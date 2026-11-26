@@ -5,6 +5,11 @@
 // the call returns. The plugin tells that the parent is blocked from the `subagent` call's progress
 // event, which names the child; the evidence also records the parent's running `subagent` tool
 // part as `session.context` returns it, whose metadata does not name the child.
+//
+// OpenCode 2.3 and later run every subagent in the background, so the call returns at once and
+// nothing blocks the parent. The scenario tells which from whether the call's result reached the
+// parent while the prompt was still open. There, the parent is idle while the child waits, gets
+// exactly one notice, and reads it, and the child's answer arrives in OpenCode's completed report.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Stream } from "effect";
@@ -25,6 +30,7 @@ import {
   readLlm,
   readLog,
   recordRequest,
+  reportBody,
   runDir,
   toolCallResponse,
   until,
@@ -140,6 +146,8 @@ export default OpenCodeDriver.use(
           JSON.stringify(n.metadata).includes(`"sessionID":"${child}"`),
         );
       const whileBlocked = noticesFor();
+      // A foreground call cannot return before the child, which waits on the prompt, has answered.
+      const background = capturedToolResult(dir, "p_fg") !== undefined;
 
       const answerAt = Date.now();
       yield* opencode.permission
@@ -160,6 +168,13 @@ export default OpenCodeDriver.use(
         await waitIdle(instance, child);
         await waitIdle(instance, parent);
       });
+      const answer = background
+        ? yield* Effect.promise(() =>
+            until("completed report", () =>
+              reportBody(dir, parent, child, "completed", answerAt),
+            ).catch(() => undefined),
+          )
+        : fgText;
       yield* Effect.sleep(1000);
       yield* Effect.promise(() => waitIdle(instance, parent));
       const after = noticesFor();
@@ -190,15 +205,29 @@ export default OpenCodeDriver.use(
           (line) => line.includes(POSTED) && line.includes(child),
         ),
         result: fgText.slice(0, 200),
+        background,
+        answer: answer?.slice(0, 200),
       };
 
-      const checks = {
-        parentBlocked,
-        noNoticeWhileBlocked: whileBlocked.length === 0,
-        noNoticeAfter: after.length === 0,
-        foregroundReturned: fgText.includes("FG-DONE"),
-        probeNeverEnforced: readLog(dir).every((r) => r.kind !== "enforce"),
-      };
+      const probeNeverEnforced = readLog(dir).every(
+        (r) => r.kind !== "enforce",
+      );
+      const checks: Readonly<Record<string, boolean>> = background
+        ? {
+            parentIdleWhileChildWaits: !parentBlocked,
+            oneNoticeWhileWaiting: whileBlocked.length === 1,
+            noDuplicateNotice: after.length === 1,
+            parentReadNotice: parentRead !== undefined,
+            answerReported: answer?.includes("FG-DONE") === true,
+            probeNeverEnforced,
+          }
+        : {
+            parentBlocked,
+            noNoticeWhileBlocked: whileBlocked.length === 0,
+            noNoticeAfter: after.length === 0,
+            foregroundReturned: fgText.includes("FG-DONE"),
+            probeNeverEnforced,
+          };
 
       yield* finishScenario(dir, "notice-foreground", evidence, checks);
     }),

@@ -145,6 +145,13 @@ export default Plugin.define({
         name: text(data, "name"),
         tool: text(data, "tool") ?? text(data, "name"),
         callID: text(data, "callID"),
+        // A failed tool's error type and whether its tool reported the call as interrupted, which
+        // a long error message can push past the preview.
+        errorType: text(field(data, "error"), "type"),
+        toolInterrupted:
+          field(field(data, "metadata"), "interrupted") === true
+            ? true
+            : undefined,
         data: preview(data),
       });
     };

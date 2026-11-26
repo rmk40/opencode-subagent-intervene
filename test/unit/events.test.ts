@@ -6,7 +6,9 @@ import {
   RESUBSCRIBE_MAX_MS,
   RESUBSCRIBE_MIN_MS,
 } from "@/events";
+import { textDelta } from "./activity-fixtures";
 import {
+  deferred,
   executionStarted,
   FakeClock,
   flush,
@@ -314,6 +316,122 @@ describe("consume", () => {
     expect(opened).toBe(2);
     controller.abort();
     await done;
+  });
+
+  test("records activity as events arrive while the latch's work on an earlier event is pending", async () => {
+    const h = harness();
+    const activity: string[] = [];
+    const latchWork = deferred<void>();
+    const handlers: EventHandlers = {
+      ...h.handlers,
+      activity: {
+        onEvent: (event) => activity.push(event.id),
+        reset: () => {},
+      },
+      latch: {
+        onEvent: async (event) => {
+          h.seen.push(`latch:${event.id}`);
+          if (event.id === first.id) await latchWork.promise;
+        },
+      },
+    };
+    const controller = new AbortController();
+    const first = executionStarted("s1");
+    const streamed = textDelta("s1", 1);
+    const second = executionStarted("s2");
+    const done = consume(
+      () => stream([first, streamed, second]),
+      handlers,
+      controller.signal,
+    );
+    await flush();
+    expect(activity).toEqual([first.id, streamed.id, second.id]);
+    expect(h.seen).toEqual([`run:${first.id}`, `latch:${first.id}`]);
+    latchWork.resolve();
+    await flush();
+    controller.abort();
+    await done;
+    // Control events keep their order; the streamed event reaches activity alone.
+    expect(h.seen).toEqual([
+      `run:${first.id}`,
+      `latch:${first.id}`,
+      `run:${second.id}`,
+      `latch:${second.id}`,
+    ]);
+  });
+
+  test("feeds each control event to the stall notices after the latch, and resets them and activity across a gap", async () => {
+    const h = harness();
+    const resets: string[] = [];
+    const handlers: EventHandlers = {
+      ...h.handlers,
+      activity: { onEvent: () => {}, reset: () => resets.push("activity") },
+      stall: {
+        onEvent: (event) => h.seen.push(`stall:${event.id}`),
+        reset: () => resets.push("stall"),
+      },
+    };
+    const controller = new AbortController();
+    const event = executionStarted("s1");
+    let opened = 0;
+    const done = consume(
+      () => {
+        opened++;
+        return opened === 1 ? stream([event]) : openUntil(controller.signal);
+      },
+      handlers,
+      controller.signal,
+    );
+    await flush();
+    expect(h.seen).toEqual([
+      `run:${event.id}`,
+      `latch:${event.id}`,
+      `stall:${event.id}`,
+    ]);
+    expect(resets).toEqual(["activity", "stall"]);
+    h.clock.advance(RESUBSCRIBE_MIN_MS);
+    await flush();
+    controller.abort();
+    await done;
+  });
+
+  test("resets the latch across a gap only once the events before it are handled", async () => {
+    const h = harness();
+    const order: string[] = [];
+    const work = deferred<void>();
+    const handlers: EventHandlers = {
+      ...h.handlers,
+      latch: {
+        onEvent: async () => {
+          order.push("event");
+          await work.promise;
+          order.push("handled");
+        },
+        reset: () => order.push("reset"),
+      },
+    };
+    const controller = new AbortController();
+    let opened = 0;
+    const done = consume(
+      () => {
+        opened++;
+        return opened === 1
+          ? stream([executionStarted("s1")])
+          : openUntil(controller.signal);
+      },
+      handlers,
+      controller.signal,
+    );
+    await flush();
+    expect(order).toEqual(["event"]);
+    work.resolve();
+    await flush();
+    expect(order).toEqual(["event", "handled", "reset"]);
+    h.clock.advance(RESUBSCRIBE_MIN_MS);
+    await flush();
+    controller.abort();
+    await done;
+    expect(order).toEqual(["event", "handled", "reset"]);
   });
 
   test("stops without resubscribing once the signal aborts", async () => {

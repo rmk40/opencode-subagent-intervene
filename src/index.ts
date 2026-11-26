@@ -1,13 +1,19 @@
 // Subagent controls, self-context tools, durable notices and the parent-stop latch.
 
 import { Plugin } from "@opencode/plugin";
+import { ActivityTracker } from "@/core/activity";
 import { ContextNotices } from "@/core/context-notice";
-import { DEFAULT_CONTEXT_WARNING_PERCENT } from "@/core/context-usage";
+import {
+  type CompactionBuffer,
+  DEFAULT_CONTEXT_WARNING_PERCENT,
+  isCompactionBuffer,
+} from "@/core/context-usage";
 import { DEFAULT_LATCH_TTL_MS, Latch } from "@/core/latch";
 import { DEFAULT_NOTICE_DELAY_MS, PromptNotices } from "@/core/notices";
 import { type Logger, type OpenCodeEvent, PLUGIN_ID } from "@/core/ports";
 import { RunStateTracker } from "@/core/run-state";
 import { renderStopNote } from "@/core/sanitize";
+import { DEFAULT_STALL_NOTICE_MS, StallNotices } from "@/core/stall";
 import { DEFAULT_SETTLE_MS } from "@/core/stop";
 import { consume } from "@/events";
 import { consoleLogger, createHost } from "@/host";
@@ -21,12 +27,16 @@ import { errorMessage, NAMESPACE, NAMESPACE_DESCRIPTION } from "@/tools/shared";
 import { stopTool } from "@/tools/stop";
 
 const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 const SECOND_MS = 1000;
 export const MAX_PROMPT_NOTICE_SECONDS = 3600;
+export const MAX_STALL_NOTICE_MINUTES = 1440;
 
 /**
- * Every event type the run-state fold, the latch, or the prompt notices handle. The subscription
- * asks for these only, so streaming events from busy sessions never queue up ahead of them.
+ * Every event type the run-state fold, the latch, the notices or activity tracking handle. The
+ * subscription asks for these only. The step, text, reasoning and tool-input events show that a
+ * session is making progress; they feed activity tracking alone, so they never queue up ahead of
+ * the others (see `CONTROL_EVENT_TYPES`).
  */
 export const EVENT_TYPES = [
   "session.created",
@@ -47,6 +57,21 @@ export const EVENT_TYPES = [
   "session.tool.progress",
   "session.tool.success",
   "session.tool.failed",
+  "session.step.started",
+  "session.step.streamed",
+  "session.step.ended",
+  "session.step.failed",
+  "session.text.started",
+  "session.text.delta",
+  "session.text.ended",
+  "session.reasoning.started",
+  "session.reasoning.delta",
+  "session.reasoning.ended",
+  "session.tool.input.started",
+  "session.tool.input.delta",
+  "session.tool.input.ended",
+  "session.tool.called",
+  "session.retry.scheduled",
 ] as const satisfies ReadonlyArray<OpenCodeEvent["type"]>;
 
 export interface Settings {
@@ -64,12 +89,19 @@ export interface Settings {
   readonly promptNotices: boolean;
   /** How long a prompt stays open before the parent is told; 0 tells it right away. */
   readonly promptNoticeSeconds: number;
+  /** How long a running subagent shows no progress before its parent is told; 0 turns that off. */
+  readonly stallNoticeMinutes: number;
   /** Admit durable context notices after successful local tools. */
   readonly contextNotices: boolean;
   /** Make the self-scoped compaction tool available. */
   readonly selfCompaction: boolean;
   /** Starting percentage of the current usable input window for context notices. */
   readonly contextWarningPercent: number;
+  /**
+   * Mirrors OpenCode's `compaction.buffer`, which plugins cannot read, for the automatic-compaction
+   * estimate. Unset assumes OpenCode's default buffer.
+   */
+  readonly compactionBuffer?: CompactionBuffer;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -80,6 +112,7 @@ export const DEFAULT_SETTINGS: Settings = {
   settleMs: DEFAULT_SETTLE_MS,
   promptNotices: true,
   promptNoticeSeconds: DEFAULT_NOTICE_DELAY_MS / SECOND_MS,
+  stallNoticeMinutes: DEFAULT_STALL_NOTICE_MS / MINUTE_MS,
   contextNotices: true,
   selfCompaction: true,
   contextWarningPercent: DEFAULT_CONTEXT_WARNING_PERCENT,
@@ -98,9 +131,11 @@ export function parseOptions(
     settleMs,
     promptNotices,
     promptNoticeSeconds,
+    stallNoticeMinutes,
     contextNotices,
     selfCompaction,
     contextWarningPercent,
+    compactionBuffer,
   } = DEFAULT_SETTINGS;
   const ignore = (option: string, value: unknown, expected: string) =>
     logger.warn(`ignoring option ${option}: expected ${expected}`, {
@@ -147,6 +182,21 @@ export function parseOptions(
           );
         }
         break;
+      case "stallNoticeMinutes":
+        if (
+          isFiniteNumber(value) &&
+          value >= 0 &&
+          value <= MAX_STALL_NOTICE_MINUTES
+        ) {
+          stallNoticeMinutes = value;
+        } else {
+          ignore(
+            option,
+            value,
+            `a number of minutes from 0 to ${MAX_STALL_NOTICE_MINUTES}`,
+          );
+        }
+        break;
       case "contextNotices":
         if (typeof value === "boolean") contextNotices = value;
         else ignore(option, value, "a boolean");
@@ -162,6 +212,17 @@ export function parseOptions(
           ignore(option, value, "a finite number greater than 0 and less than 100");
         }
         break;
+      case "compactionBuffer":
+        if (isCompactionBuffer(value)) {
+          compactionBuffer = value;
+        } else {
+          ignore(
+            option,
+            value,
+            'a percentage string from "1%" to below "100%", such as "10%" or "12.5%", or a whole number of tokens, 0 or more',
+          );
+        }
+        break;
       default:
         logger.warn(`ignoring unknown option ${option}`);
     }
@@ -174,9 +235,11 @@ export function parseOptions(
     settleMs,
     promptNotices,
     promptNoticeSeconds,
+    stallNoticeMinutes,
     contextNotices,
     selfCompaction,
     contextWarningPercent,
+    ...(compactionBuffer === undefined ? {} : { compactionBuffer }),
   };
 }
 
@@ -190,10 +253,16 @@ export default Plugin.define({
     const logger = consoleLogger();
     const settings = parseOptions(ctx.options, logger);
     const host = createHost(ctx, logger);
-    const runState = new RunStateTracker({
-      control: host.control,
-      clock: host.clock,
-    });
+    const activity = new ActivityTracker();
+    const runState = new RunStateTracker(
+      {
+        control: host.control,
+        clock: host.clock,
+        activity,
+        reader: host.reader,
+      },
+      { reconcile: host.waitAvailable },
+    );
     const latch = new Latch(
       {
         store: host.store,
@@ -201,6 +270,8 @@ export default Plugin.define({
         clock: host.clock,
         logger,
         renderNote: renderStopNote,
+        reader: host.reader,
+        scheduler: host.scheduler,
       },
       { ttlMs: settings.latchTtlHours * HOUR_MS },
     );
@@ -218,6 +289,23 @@ export default Plugin.define({
           { delayMs: settings.promptNoticeSeconds * SECOND_MS },
         )
       : undefined;
+    // A stall notice must confirm the session's state with `session.wait` before it is posted.
+    const stallNotices =
+      settings.stallNoticeMinutes > 0 && host.waitAvailable
+        ? new StallNotices(
+            {
+              activity,
+              runState,
+              reader: host.reader,
+              messenger: host.messenger,
+              ...(settings.latch ? { latch } : {}),
+              scheduler: host.scheduler,
+              clock: host.clock,
+              logger,
+            },
+            { thresholdMs: settings.stallNoticeMinutes * MINUTE_MS },
+          )
+        : undefined;
     const contextNotices = settings.contextNotices
       ? new ContextNotices(
           {
@@ -229,6 +317,7 @@ export default Plugin.define({
           },
           {
             warningPercent: settings.contextWarningPercent,
+            compactionBuffer: settings.compactionBuffer,
           },
         )
       : undefined;
@@ -252,9 +341,11 @@ export default Plugin.define({
           signal: subscription.signal,
         }),
       {
+        activity,
         runState,
         latch: settings.latch ? latch : undefined,
         ...(notices === undefined ? {} : { notices }),
+        ...(stallNotices === undefined ? {} : { stall: stallNotices }),
         logger,
         clock: host.clock,
         // Events missed during the gap may have started or ended runs, so the startup pass runs
@@ -287,6 +378,22 @@ export default Plugin.define({
             }
           }),
         );
+        // OpenCode runs this hook inside a run's step, before each primary model request, and only
+        // in the copy for the session's location. A woken run of a stopped session is held here
+        // until the latch has interrupted it. Session hooks have no failure channel, so a rejection
+        // would fail the run; this hook never rejects.
+        registrations.push(
+          await ctx.session.hook("context", async (event) => {
+            try {
+              await latch.beforeRequest(event.sessionID);
+            } catch (error) {
+              logger.warn("context hook failed; the request was left alone", {
+                sessionID: event.sessionID,
+                error: errorMessage(error),
+              });
+            }
+          }),
+        );
       }
       registrations.push(
         await ctx.tool.transform((editor) => {
@@ -296,6 +403,7 @@ export default Plugin.define({
               {
                 warningPercent: settings.contextWarningPercent,
                 warningsEnabled: settings.contextNotices,
+                compactionBuffer: settings.compactionBuffer,
               },
             ),
           );
@@ -342,6 +450,8 @@ export default Plugin.define({
                 messenger: host.messenger,
                 latch,
                 runState,
+                clock: host.clock,
+                activity,
                 logger,
               },
               { latch: settings.latch },
@@ -349,7 +459,14 @@ export default Plugin.define({
           );
           editor.add(
             listTool(
-              { reader: host.reader, latch, runState, logger },
+              {
+                reader: host.reader,
+                latch,
+                runState,
+                clock: host.clock,
+                activity,
+                logger,
+              },
               { latch: settings.latch },
             ),
           );
@@ -360,6 +477,7 @@ export default Plugin.define({
                 latch,
                 runState,
                 clock: host.clock,
+                activity,
                 logger,
               },
               { latch: settings.latch },
@@ -374,9 +492,12 @@ export default Plugin.define({
           ),
         );
       }
+      stallNotices?.start();
     } catch (error) {
       subscription.abort();
+      latch.dispose();
       notices?.dispose();
+      stallNotices?.dispose();
       contextNotices?.dispose();
       await disposeAll(registrations, logger);
       throw error;
@@ -384,7 +505,9 @@ export default Plugin.define({
 
     return async () => {
       subscription.abort();
+      latch.dispose();
       notices?.dispose();
+      stallNotices?.dispose();
       contextNotices?.dispose();
       await disposeAll(registrations, logger);
       await consuming;

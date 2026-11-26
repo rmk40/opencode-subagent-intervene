@@ -400,6 +400,124 @@ export const completionNotices = (
 export const noticeState = (notice: { readonly metadata: unknown }) =>
   metadataText(notice.metadata, "state");
 
+/**
+ * The state and body of OpenCode's notice about a subagent, in either of its formats:
+ * `<subagent …>` before OpenCode 2.4, `<background-result kind="subagent" …>` from 2.4. The probe
+ * keeps the first 300 characters of a notice, so a longer one does not parse.
+ */
+export function parseSubagentNotice(
+  text: unknown,
+): { readonly state: string; readonly body: string } | undefined {
+  if (typeof text !== "string") return undefined;
+  const match =
+    /^<(?:subagent|background-result kind="subagent") [^>]*?state="([^"]*)"[^>]*>\n([\s\S]*)\n<\/(?:subagent|background-result)>$/.exec(
+      text,
+    );
+  return match?.[1] === undefined || match[2] === undefined
+    ? undefined
+    : { state: match[1], body: match[2] };
+}
+
+/**
+ * The body of the first notice in `state` that `sessionID` got about its subagent `childID` at or
+ * after `since`.
+ */
+export const reportBody = (
+  dir: string,
+  sessionID: string,
+  childID: string,
+  state: string,
+  since: number,
+): string | undefined =>
+  completionNotices(dir, sessionID, childID)
+    .filter((notice) => notice.at >= since && noticeState(notice) === state)
+    .map((notice) => parseSubagentNotice(notice.text)?.body)
+    .find((body) => body !== undefined);
+
+/** The terminal event of a run that OpenCode reports to the parent in each state. */
+const REPORTED_END: Readonly<Record<string, string>> = {
+  cancelled: "session.execution.interrupted",
+  completed: "session.execution.succeeded",
+  error: "session.execution.failed",
+};
+
+export interface RunReports {
+  /** Notices in the window that are not a report in the expected state about one of the children. */
+  readonly others: ReadonlyArray<unknown>;
+  /** Per child: its reports in the expected state, and its runs that ended that way. */
+  readonly byChild: Readonly<
+    Record<string, { readonly reports: number; readonly runs: number }>
+  >;
+}
+
+/**
+ * Tallies the synthetic notices `parentID` got in `[since, before)` against the runs of its
+ * subagents `childIDs` that ended in the window. OpenCode before 2.3 reports to the parent only the
+ * run a background `subagent` call started; from 2.3 it reports every run a subagent ends, so a run
+ * the latch interrupts adds a cancelled report. A run reported in `state` ends with that state's
+ * terminal event, so a subagent never has more such reports than runs that ended that way, on
+ * either version.
+ */
+export function runReports(
+  dir: string,
+  parentID: string,
+  childIDs: ReadonlyArray<string>,
+  state: string,
+  since: number,
+  before = Number.POSITIVE_INFINITY,
+): RunReports {
+  const inWindow = (at: number) => at >= since && at < before;
+  const others: unknown[] = [];
+  const reports = new Map<string, number>(childIDs.map((id) => [id, 0]));
+  for (const notice of distinctNotices(dir, parentID)) {
+    if (!inWindow(notice.at)) continue;
+    const childID = metadataText(notice.metadata, "childID");
+    const reported =
+      metadataText(notice.metadata, "source") === "subagent" &&
+      noticeState(notice) === state &&
+      childID !== undefined &&
+      reports.has(childID);
+    if (reported) reports.set(childID, (reports.get(childID) ?? 0) + 1);
+    else others.push(notice.metadata ?? notice.text);
+  }
+  const ends = new Set<string>();
+  const runs = new Map<string, number>(childIDs.map((id) => [id, 0]));
+  for (const event of events(readLog(dir))) {
+    const id = typeof event.id === "string" ? event.id : "";
+    const sessionID = event.sessionID ?? "";
+    if (
+      event.type !== REPORTED_END[state] ||
+      !runs.has(sessionID) ||
+      !inWindow(event.at) ||
+      ends.has(id)
+    )
+      continue;
+    ends.add(id);
+    runs.set(sessionID, (runs.get(sessionID) ?? 0) + 1);
+  }
+  return {
+    others,
+    byChild: Object.fromEntries(
+      childIDs.map((id) => [
+        id,
+        { reports: reports.get(id) ?? 0, runs: runs.get(id) ?? 0 },
+      ]),
+    ),
+  };
+}
+
+/**
+ * Whether the tallied notices are only reports in the expected state, with no subagent reported
+ * more often than its runs ended that way and each of `required` reported at least once.
+ */
+export const onlyRunReports = (
+  tally: RunReports,
+  required: ReadonlyArray<string> = [],
+): boolean =>
+  tally.others.length === 0 &&
+  Object.values(tally.byChild).every(({ reports, runs }) => reports <= runs) &&
+  required.every((id) => (tally.byChild[id]?.reports ?? 0) > 0);
+
 export interface PendingPermission {
   readonly id: string;
   readonly action: string;

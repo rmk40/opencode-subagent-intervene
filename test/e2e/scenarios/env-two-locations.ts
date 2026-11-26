@@ -1,6 +1,7 @@
 // Two locations. The plugin comes from global config (Drive's OPENCODE_CONFIG_DIR), so every
 // location loads its own instance. The parent stays in the project directory and moves its child to
-// a second directory with `opencode.session_move`. The parent stops the child there; the stop runs
+// a second directory with OpenCode's Code Mode move tool, `tools.opencode.session.move` from
+// OpenCode 2.4 and `tools.opencode.session_move` before. The parent stops the child there; the stop runs
 // in the parent's instance. The parent's location is then evicted, so only the child's instance is
 // loaded when a notice wakes the child, and that instance interrupts the run. Continuing the child
 // afterwards runs its prompt hook in the child's location, which lifts the latch and prepends the
@@ -29,6 +30,7 @@ import {
   readLlm,
   readLog,
   recordRequest,
+  reportBody,
   runDir,
   toolCallResponse,
   until,
@@ -84,8 +86,10 @@ export default OpenCodeDriver.use(
             }
           }
           if (last.text.includes("CMD-MOVE"))
+            // Code Mode rejects a path it doesn't know with "Unknown tool", so the older path is
+            // the fallback.
             return toolCallResponse("p_move", "execute", {
-              code: `return JSON.stringify(await tools.opencode.session_move({ sessionID: ${JSON.stringify(child)}, directory: ${JSON.stringify(locationB)} }));`,
+              code: `const input = { sessionID: ${JSON.stringify(child)}, directory: ${JSON.stringify(locationB)} }; try { return JSON.stringify(await tools.opencode.session.move(input)); } catch (error) { if (!String(error).includes("Unknown tool")) throw error; return JSON.stringify(await tools.opencode.session_move(input)); }`,
             });
           if (last.text.includes("CMD-WORK"))
             return toolCallResponse("p_work", "subagent", {
@@ -253,13 +257,24 @@ export default OpenCodeDriver.use(
       );
       yield* Effect.sleep(2500);
       const wakeCheckedAt = Date.now();
-      const parentLocationLoadsDuringWake = readLog(dir).filter(
-        (r) =>
-          r.kind === "ready" &&
-          r.location === directory &&
-          r.at >= evictAt &&
-          r.at < wakeCheckedAt,
-      ).length;
+      // From OpenCode 2.3, the interrupted run's cancelled report wakes the parent, which loads
+      // its location again once the woken run has ended.
+      const parentLocationLoads = (from: number, to: number) =>
+        readLog(dir).filter(
+          (r) =>
+            r.kind === "ready" &&
+            r.location === directory &&
+            r.at >= from &&
+            r.at < to,
+        ).length;
+      const parentLocationLoadsDuringWake = parentLocationLoads(
+        evictAt,
+        wokenEnd.at,
+      );
+      const parentLocationLoadsAfterWake = parentLocationLoads(
+        wokenEnd.at,
+        wakeCheckedAt,
+      );
       const enforcedAfterWake = pluginConsole(artifacts).filter((line) =>
         line.includes(ENFORCED),
       );
@@ -296,6 +311,15 @@ export default OpenCodeDriver.use(
         }),
       );
       yield* wait(parent, "session.execution.succeeded", contAt);
+      // The answer comes back in the call's result, or in OpenCode's completed report where every
+      // subagent runs in the background (OpenCode 2.3 and later).
+      const contAnswer = contText.includes("CONT-ANSWER")
+        ? contText
+        : yield* Effect.promise(() =>
+            until("continuation report", () =>
+              reportBody(dir, parent, child, "completed", contAt),
+            ).catch(() => undefined),
+          );
 
       const log = readLog(dir);
       const contRequest = readLlm(dir).find(
@@ -332,11 +356,13 @@ export default OpenCodeDriver.use(
           enforcedBeforeWake,
           enforcedAfterWake,
           parentLocationLoadsDuringWake,
+          parentLocationLoadsAfterWake,
         },
         continuation: {
           prompt: continuation.request.last.text,
           hookLocation: continuation.record.location,
           result: contText.slice(0, 300),
+          answer: contAnswer?.slice(0, 300),
           firstRequestAt: contRequest?.at,
         },
         latches: Object.fromEntries(listedLatches(codeModeValue(listText))),
@@ -367,7 +393,7 @@ export default OpenCodeDriver.use(
         noteDelivered:
           noteMatch?.[1] === REASON &&
           continuation.request.last.text.endsWith(CONT_PROMPT),
-        continuationAnswered: contText.includes("CONT-ANSWER"),
+        continuationAnswered: contAnswer?.includes("CONT-ANSWER") === true,
         latchLifted:
           listedLatches(codeModeValue(listText)).get(child) === "lifted",
         probeNeverEnforced: log.every((r) => r.kind !== "enforce"),

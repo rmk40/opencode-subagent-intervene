@@ -18,6 +18,7 @@ import {
   LIST_SUBTREE_CODE,
   listedLatches,
   notices,
+  parseSubagentNotice,
   pluginConsole,
   probePlugin,
   REPO_ROOT,
@@ -38,13 +39,18 @@ const ANSWER = "CONT-ANSWER-7: the second part is done";
 if (!existsSync(join(REPO_ROOT, "dist", "index.js")))
   throw new Error("dist/index.js is missing; run `bun run build` first");
 
-/** The output inside a completed notice's `<subagent>` element. */
-const completedOutput = (text: unknown) =>
-  typeof text === "string"
-    ? /^<subagent [^>]*state="completed"[^>]*>\n([\s\S]*)\n<\/subagent>$/.exec(
-        text,
-      )?.[1]
-    : undefined;
+/** The output inside a completed notice, in either of OpenCode's notice formats. */
+const completedOutput = (text: unknown) => {
+  const notice = parseSubagentNotice(text);
+  return notice?.state === "completed" ? notice.body : undefined;
+};
+
+/** Whether `text` holds a notice element that ends with exactly `answer`, in either format. */
+const endsNoticeWith = (text: string | undefined, answer: string) =>
+  text !== undefined &&
+  ["subagent", "background-result"].some((element) =>
+    text.includes(`\n${answer}\n</${element}>`),
+  );
 
 export default OpenCodeDriver.use(
   {
@@ -268,9 +274,7 @@ export default OpenCodeDriver.use(
         oneNoticeAfterContinue:
           noticesAfterCont.length === 1 &&
           !JSON.stringify(noticesAfterCont).includes('"cancelled"'),
-        parentModelGotNotice:
-          parentSawNotice?.last.text.includes(`\n${ANSWER}\n</subagent>`) ===
-          true,
+        parentModelGotNotice: endsNoticeWith(parentSawNotice?.last.text, ANSWER),
         answerPersisted: JSON.stringify(childContext).includes(ANSWER),
         latchLifted: latches.get(child) === "lifted",
         probeNeverEnforced: readLog(dir).every((r) => r.kind !== "enforce"),

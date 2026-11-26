@@ -13,6 +13,24 @@ import { sinceCompaction } from "@/core/summarize";
 export const DEFAULT_CONTEXT_WARNING_PERCENT = 50;
 export const MEASUREMENT_SCOPE =
   "Later messages and pending tool or subagent results are not included in this measurement.";
+const COMPACTION_BUFFER_HINT =
+  "if compaction.buffer is set in OpenCode, set the plugin's compactionBuffer option to match";
+
+/**
+ * OpenCode's `compaction.buffer`, the room kept free below the window before automatic compaction:
+ * a share of the window from "1%" to under "100%", or a token count.
+ */
+export type CompactionBuffer = string | number;
+
+/** The pattern OpenCode's config schema accepts for a percentage buffer. */
+const COMPACTION_BUFFER_PERCENT = /^([1-9]\d?(\.\d+)?)%$/u;
+
+/** Accepts the same forms as OpenCode's `compaction.buffer`: a percentage string or a non-negative integer. */
+export function isCompactionBuffer(value: unknown): value is CompactionBuffer {
+  return typeof value === "string"
+    ? COMPACTION_BUFFER_PERCENT.test(value)
+    : typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
 
 type Assistant = Extract<SessionMessageInfo, { type: "assistant" }>;
 type Model = Assistant["model"];
@@ -47,8 +65,8 @@ export interface ContextUsage {
   readonly reportedWindowPercent?: number;
   /** Usable input window minus reported tokens; negative when the measurement overruns it. */
   readonly inputHeadroomTokens?: number;
-  /** Default auto-compaction estimate minus reported tokens; negative once past it. */
-  readonly defaultAutoCompactionHeadroomTokens?: number;
+  /** Automatic-compaction estimate minus reported tokens; negative once past it. */
+  readonly autoCompactionHeadroomTokens?: number;
   readonly completedCompactionID?: string;
   readonly latestCompaction?: {
     readonly id: string;
@@ -57,13 +75,24 @@ export interface ContextUsage {
   };
   readonly historyBoundary: "active" | "before-revert" | "revert-marker-missing";
   readonly revertMessageID?: string;
-  readonly autoCompactionThreshold: "unknown";
-  readonly defaultAutoCompactionThreshold?: {
+  /**
+   * Where OpenCode starts automatic compaction in the usable window, assuming it is on. `configured`
+   * comes from the plugin's `compactionBuffer` option; `default` assumes OpenCode's default buffer.
+   * `configured-ignored`: the configured buffer leaves no room in this window, so OpenCode ignores
+   * it and the estimate uses the default buffer.
+   */
+  readonly autoCompactionEstimate?: {
     readonly tokens: number;
     readonly percent: number;
+    readonly source: "configured" | "configured-ignored" | "default";
   };
   readonly contextWarningPercent: number;
   readonly measurementScope: string;
+}
+
+export interface ContextUsageOptions {
+  readonly warningPercent?: number;
+  readonly compactionBuffer?: CompactionBuffer;
 }
 
 export interface ContextUsageDeps {
@@ -72,20 +101,19 @@ export interface ContextUsageDeps {
   readonly logger: Logger;
 }
 
-export interface ContextUsageInput {
+export interface ContextUsageInput extends ContextUsageOptions {
   readonly sessionID: SessionID;
   readonly messageID: string;
   readonly messages: readonly SessionMessageInfo[];
   readonly models: readonly ContextModel[];
   readonly revert?: SessionInfo["revert"];
-  readonly warningPercent?: number;
 }
 
 /** Reads the caller's history and the catalog for its own directory without caching either. */
 export async function readContextUsage(
   deps: ContextUsageDeps,
   call: { readonly sessionID: SessionID; readonly messageID: string },
-  warningPercent = DEFAULT_CONTEXT_WARNING_PERCENT,
+  options: ContextUsageOptions = {},
 ): Promise<{
   readonly session: SessionInfo;
   readonly messages: readonly SessionMessageInfo[];
@@ -111,7 +139,7 @@ export async function readContextUsage(
     session,
     messages,
     usage: selectContextUsage({
-      ...call, messages, models, revert: session.revert, warningPercent,
+      ...call, messages, models, revert: session.revert, ...options,
     }),
   };
 }
@@ -135,7 +163,7 @@ export function selectContextUsage(input: ContextUsageInput): ContextUsage {
   const usableInputWindow = context === undefined
     ? inputLimit
     : inputLimit === undefined ? context : Math.min(context, inputLimit);
-  const defaultAutoThreshold = defaultAutoCompactionThreshold(usableInputWindow);
+  const autoEstimate = autoCompactionEstimate(usableInputWindow, input.compactionBuffer);
   const { compaction, assistants } = sinceCompaction(boundary.messages);
   const latestCompaction = boundary.messages.findLast(
     (message): message is Compaction => message.type === "compaction",
@@ -190,12 +218,9 @@ export function selectContextUsage(input: ContextUsageInput): ContextUsage {
       : {}),
     ...(current === undefined || usableInputWindow === undefined
       ? {} : { inputHeadroomTokens: usableInputWindow - current.reportedTokens }),
-    ...(current === undefined || defaultAutoThreshold === undefined
+    ...(current === undefined || autoEstimate === undefined
       ? {}
-      : {
-          defaultAutoCompactionHeadroomTokens:
-            defaultAutoThreshold.tokens - current.reportedTokens,
-        }),
+      : { autoCompactionHeadroomTokens: autoEstimate.tokens - current.reportedTokens }),
     ...(compaction === undefined ? {} : { completedCompactionID: compaction.id }),
     ...(latestCompaction === undefined
       ? {}
@@ -209,9 +234,7 @@ export function selectContextUsage(input: ContextUsageInput): ContextUsage {
         }),
     historyBoundary: boundary.status,
     ...(input.revert === undefined ? {} : { revertMessageID: input.revert.messageID }),
-    autoCompactionThreshold: "unknown",
-    ...(defaultAutoThreshold === undefined
-      ? {} : { defaultAutoCompactionThreshold: defaultAutoThreshold }),
+    ...(autoEstimate === undefined ? {} : { autoCompactionEstimate: autoEstimate }),
     contextWarningPercent: input.warningPercent ?? DEFAULT_CONTEXT_WARNING_PERCENT,
     measurementScope: MEASUREMENT_SCOPE,
   };
@@ -236,14 +259,37 @@ function positiveLimit(value: number | undefined): number | undefined {
     ? value : undefined;
 }
 
-/** Default buffer only. OpenCode applies the 16k minimum reserve to windows of at least 32k. */
-function defaultAutoCompactionThreshold(
+/**
+ * Mirrors OpenCode's trigger. A configured buffer is kept free as given, with no minimum, and one
+ * that leaves no room is ignored for that window. The default keeps 15% free, or 16k when that is
+ * more on windows of at least 32k.
+ */
+function autoCompactionEstimate(
   window: number | undefined,
-): ContextUsage["defaultAutoCompactionThreshold"] {
+  buffer: CompactionBuffer | undefined,
+): ContextUsage["autoCompactionEstimate"] {
   if (window === undefined) return undefined;
-  const tokens = window - Math.max(Math.floor(window * 0.15), window >= 32_000 ? 16_000 : 0);
-  return { tokens, percent: tokens / window * 100 };
+  const reserved = typeof buffer === "string"
+    ? Math.round(window * Number.parseFloat(buffer) / 100)
+    : buffer;
+  const fits = reserved !== undefined && reserved < window;
+  const tokens = fits
+    ? window - reserved
+    : window - Math.max(Math.floor(window * 0.15), window >= 32_000 ? 16_000 : 0);
+  return {
+    tokens,
+    percent: tokens / window * 100,
+    source: buffer === undefined ? "default" : fits ? "configured" : "configured-ignored",
+  };
 }
+
+const ESTIMATE_LABELS: Readonly<
+  Record<NonNullable<ContextUsage["autoCompactionEstimate"]>["source"], string>
+> = {
+  configured: "configured auto",
+  "configured-ignored": "configured buffer ignored, default auto",
+  default: "assumed default auto",
+};
 
 function hasUsage(tokens: Assistant["tokens"]): boolean {
   if (tokens === undefined) return false;
@@ -307,15 +353,16 @@ function formatTokens(tokens: number): string {
 }
 
 /** Distance appears only with a current-model measurement; the estimate alone does not need one. */
-export function renderDefaultAutoCompaction(usage: ContextUsage): readonly string[] {
-  if (usage.defaultAutoCompactionThreshold === undefined) return [];
-  const estimate = `default auto ~${formatTokens(usage.defaultAutoCompactionThreshold.tokens)}`;
-  const headroom = usage.defaultAutoCompactionHeadroomTokens;
-  if (headroom === undefined) return [estimate];
+export function renderAutoCompactionEstimate(usage: ContextUsage): readonly string[] {
+  const estimate = usage.autoCompactionEstimate;
+  if (estimate === undefined) return [];
+  const label = `${ESTIMATE_LABELS[estimate.source]} ~${formatTokens(estimate.tokens)}`;
+  const headroom = usage.autoCompactionHeadroomTokens;
+  if (headroom === undefined) return [label];
   return [
     headroom < 0
-      ? `${estimate} (${formatTokens(-headroom)} past estimate)`
-      : `${estimate} (${formatTokens(headroom)} away)`,
+      ? `${label} (${formatTokens(-headroom)} past estimate)`
+      : `${label} (${formatTokens(headroom)} away)`,
   ];
 }
 
@@ -327,7 +374,8 @@ export function renderContextUsage(
   return [
     renderMeasurement(usage),
     warningsEnabled ? `notices from ${usage.contextWarningPercent}%` : "notices disabled",
-    ...renderDefaultAutoCompaction(usage),
+    ...renderAutoCompactionEstimate(usage),
+    ...(usage.autoCompactionEstimate?.source === "default" ? [COMPACTION_BUFFER_HINT] : []),
     compaction === undefined
       ? "no visible compaction"
       : `last compaction ${compaction.status}${compaction.failureMessage === undefined ? "" : ` (${compaction.failureMessage.replace(/\s+/g, " ").trim()})`}`,

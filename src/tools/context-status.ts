@@ -4,12 +4,13 @@ import {
   DEFAULT_CONTEXT_WARNING_PERCENT,
   readContextUsage,
   renderContextUsage,
+  type CompactionBuffer,
   type ContextUsageDeps,
 } from "@/core/context-usage";
 
 export const NAME = "context_status";
 export const DESCRIPTION =
-  "Read your own session's latest completed response usage and latest visible compaction as a compact status line. Input-window usage drives plugin notices, using the smaller positive input or context limit, or the only positive limit available. Shows the UI/context percentage only when its denominator differs. Structured output retains both percentages, model, limits, raw token counts and measurement IDs, plus signed token headroom to the input window and to the default auto estimate when a current-model measurement exists; negative headroom means the measurement is past that point. Later messages and pending tool or subagent results, including this call, are not included in the measurement. The default auto estimate assumes automatic compaction is enabled with OpenCode's default buffer and no override. The actual resolved automatic-compaction threshold is unavailable.";
+  "Read your own session's latest completed response usage and latest visible compaction as a compact status line. Input-window usage drives plugin notices, using the smaller positive input or context limit, or the only positive limit available. Shows the UI/context percentage only when its denominator differs. Structured output retains both percentages, model, limits, raw token counts and measurement IDs, plus signed token headroom to the input window and to the automatic-compaction estimate when a current-model measurement exists; negative headroom means the measurement is past that point. Later messages and pending tool or subagent results, including this call, are not included in the measurement. The estimate assumes automatic compaction is on. Plugins cannot read OpenCode's configuration, so it uses the plugin's compactionBuffer option, set to mirror OpenCode's compaction.buffer, and otherwise assumes OpenCode's default buffer. Plan against it: continue while the next step and its expected output fit before that point, leaving room for results not yet measured.";
 
 export const Input = Schema.Struct({});
 const Model = Schema.Struct({
@@ -51,7 +52,7 @@ export const Output = Schema.Struct({
   reportedContextPercent: Schema.optionalKey(Schema.Number),
   reportedWindowPercent: Schema.optionalKey(Schema.Number),
   inputHeadroomTokens: Schema.optionalKey(Schema.Number),
-  defaultAutoCompactionHeadroomTokens: Schema.optionalKey(Schema.Number),
+  autoCompactionHeadroomTokens: Schema.optionalKey(Schema.Number),
   completedCompactionID: Schema.optionalKey(Schema.String),
   latestCompaction: Schema.optionalKey(
     Schema.Struct({
@@ -66,9 +67,12 @@ export const Output = Schema.Struct({
     "revert-marker-missing",
   ]),
   revertMessageID: Schema.optionalKey(Schema.String),
-  autoCompactionThreshold: Schema.Literal("unknown"),
-  defaultAutoCompactionThreshold: Schema.optionalKey(
-    Schema.Struct({ tokens: Schema.Number, percent: Schema.Number }),
+  autoCompactionEstimate: Schema.optionalKey(
+    Schema.Struct({
+      tokens: Schema.Number,
+      percent: Schema.Number,
+      source: Schema.Literals(["configured", "configured-ignored", "default"]),
+    }),
   ),
   contextWarningPercent: Schema.Number,
   warningsEnabled: Schema.Boolean,
@@ -80,6 +84,7 @@ export function contextStatusTool(
   options: {
     readonly warningPercent?: number;
     readonly warningsEnabled?: boolean;
+    readonly compactionBuffer?: CompactionBuffer;
   } = {},
 ): Info<typeof Input, typeof Output> {
   const warningsEnabled = options.warningsEnabled ?? true;
@@ -90,11 +95,10 @@ export function contextStatusTool(
     output: Output,
     options: { codemode: false, permission: NAME },
     execute: async (_input, context) => {
-      const { usage } = await readContextUsage(
-        deps,
-        context,
-        options.warningPercent ?? DEFAULT_CONTEXT_WARNING_PERCENT,
-      );
+      const { usage } = await readContextUsage(deps, context, {
+        warningPercent: options.warningPercent ?? DEFAULT_CONTEXT_WARNING_PERCENT,
+        compactionBuffer: options.compactionBuffer,
+      });
       return {
         output: { ...usage, warningsEnabled },
         content: renderContextUsage(usage, warningsEnabled),

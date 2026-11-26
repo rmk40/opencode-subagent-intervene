@@ -13,18 +13,26 @@ import {
   type StoppedNode,
   stopSubagents,
 } from "@/core/stop";
-import { sessionLabel, TOOL_PERMISSION, toToolError } from "@/tools/shared";
+import {
+  sessionLabel,
+  TOOL_PERMISSION,
+  toToolErrorWithSuggestions,
+} from "@/tools/shared";
 
 export const NAME = "subagent_stop";
 
 export const DESCRIPTION =
   "Stop one or more of your subagents and everything they launched. Use when a subagent is heading the wrong way, stuck, or no longer needed. Stopped subagents keep their history and stay stopped until you continue them with subagent and their sessionID. Give a short reason. To change a running subagent's instructions without stopping it, use subagent_send instead.";
 
+/** The error a stop cancelled partway through ends with. */
+export const CANCELLED_MESSAGE =
+  "The stop was cancelled before it finished. Some of these subagents may already be stopped while others still run. Check them with subagents.list before stopping them again.";
+
 export const Input = Schema.Struct({
   sessionIDs: Schema.optionalKey(
     Schema.Array(Schema.String).check(Schema.isMaxLength(MAX_TARGETS)),
   ).annotate({
-    description: `The sessionIDs of the subagents to stop, at most ${MAX_TARGETS}. Each must be a subagent you launched or one launched below it. Give this or all, not both.`,
+    description: `The sessionIDs of the subagents to stop, at most ${MAX_TARGETS}. Each must be a subagent you launched or one launched below it; surrounding whitespace is ignored. Give this or all, not both.`,
   }),
   all: Schema.optionalKey(Schema.Boolean).annotate({
     description:
@@ -39,10 +47,14 @@ const NodeResultSchema = Schema.Literals([
   "deleted",
   "continued",
   "stopping",
+  "no_recorded_end",
   "stopped",
   "finished",
   "already_idle",
-]);
+]).annotate({
+  description:
+    "no_recorded_end: OpenCode reports it idle, but its last run recorded no end, so nothing was running to stop. It stays stopped like the others.",
+});
 
 export const Output = Schema.Struct({
   nodes: Schema.Array(
@@ -110,15 +122,14 @@ export function stopTool(
           input,
           stopOptions,
         );
-        // Core has already recorded a cancelled call as aborted and ignores this result.
+        // A host that ends a cancelled call itself records it as aborted and drops this error. A
+        // host that lets a tool settle after a stop reports this error as the call's result.
         if (output === undefined) {
-          throw new ToolError({
-            message: "The stop was cancelled before it finished.",
-          });
+          throw new ToolError({ message: CANCELLED_MESSAGE });
         }
         return { output, content: renderStopResult(output) };
       } catch (error) {
-        throw toToolError(error);
+        throw await toToolErrorWithSuggestions(error, deps, context.sessionID);
       }
     },
   };
@@ -129,6 +140,7 @@ const RESULT_TEXT: Readonly<Record<NodeResult, string>> = {
   finished: "finished on its own before the stop landed",
   already_idle: "already idle",
   stopping: "still stopping when the wait ended",
+  no_recorded_end: "not running; its last run recorded no end",
   continued: "given new work while the stop ran, so it was left running",
   deleted: "deleted",
 };

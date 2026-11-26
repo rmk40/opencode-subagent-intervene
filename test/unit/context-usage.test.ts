@@ -214,7 +214,7 @@ describe("current model and usable input window", () => {
       expect(usage.model).toBeUndefined();
       expect(usage.limits).toEqual({});
       expect(usage).not.toHaveProperty("reportedContextPercent");
-      expect(usage).not.toHaveProperty("defaultAutoCompactionThreshold");
+      expect(usage).not.toHaveProperty("autoCompactionEstimate");
       expect(usage.reportedWindowPercent).toBeUndefined();
       expect(renderMeasurement(usage)).toContain("80 reported · current model unknown");
     },
@@ -271,7 +271,7 @@ describe("current model and usable input window", () => {
     }
     if (window === undefined) {
       expect(usage.limits).toEqual({});
-      expect(usage).not.toHaveProperty("defaultAutoCompactionThreshold");
+      expect(usage).not.toHaveProperty("autoCompactionEstimate");
       expect(text).toContain("input window unknown");
     }
   });
@@ -303,14 +303,14 @@ describe("current model and usable input window", () => {
     expect(usage.status).toBe("available");
     expect(usage.limits).toEqual({});
     expect(usage).not.toHaveProperty("reportedContextPercent");
-    expect(usage).not.toHaveProperty("defaultAutoCompactionThreshold");
+    expect(usage).not.toHaveProperty("autoCompactionEstimate");
     expect(usage.reportedWindowPercent).toBeUndefined();
     expect(renderMeasurement(usage)).toContain("80 reported · input window unknown");
   });
 
-  test("keeps measurement caveats and the unknown effective threshold in structured output", () => {
+  test("keeps measurement caveats and the assumed default estimate in structured output", () => {
     const usage = select([measured()], { warningPercent: 82.5 });
-    expect(usage.autoCompactionThreshold).toBe("unknown");
+    expect(usage.autoCompactionEstimate?.source).toBe("default");
     expect(usage.contextWarningPercent).toBe(82.5);
     const text = renderContextUsage(usage);
     expect(usage.measurementScope).toBe("Later messages and pending tool or subagent results are not included in this measurement.");
@@ -326,7 +326,6 @@ describe("current model and usable input window", () => {
     expect(text).not.toContain("notices from 82.5%");
     expect(text).toContain("80 / 100 input (80%)");
     expect(usage.contextWarningPercent).toBe(82.5);
-    expect(usage.autoCompactionThreshold).toBe("unknown");
   });
 });
 
@@ -368,7 +367,7 @@ describe("compact status text", () => {
     ]);
     world.models.catalogs.set("/work", [catalogModel({ context: 1_000_000, input: 1_000_000, output: 10_000 })]);
     const result = await contextStatusTool(world).execute({}, toolContext());
-    expect(result.content).toBe("265k / 1M input (26.5%) · 735k remaining · measured 2026-11-01T22:28:00Z · notices from 50% · default auto ~850k (585k away) · last compaction completed");
+    expect(result.content).toBe("265k / 1M input (26.5%) · 735k remaining · measured 2026-11-01T22:28:00Z · notices from 50% · assumed default auto ~850k (585k away) · if compaction.buffer is set in OpenCode, set the plugin's compactionBuffer option to match · last compaction completed");
     expect(result.output).toMatchObject({
       sessionID: SESSION,
       model: { providerID: "provider", id: "model" },
@@ -377,13 +376,12 @@ describe("compact status text", () => {
       reportedContextPercent: 26.5,
       reportedWindowPercent: 26.5,
       inputHeadroomTokens: 735_000,
-      defaultAutoCompactionHeadroomTokens: 585_000,
+      autoCompactionHeadroomTokens: 585_000,
       usableInputWindow: 1_000_000,
       measurement: { messageID: "msg_snapshot", measuredAt: at, tokens: counts, reportedTokens: 265_000 },
       completedCompactionID: checkpoint.id,
       latestCompaction: { id: checkpoint.id, status: "completed" },
-      autoCompactionThreshold: "unknown",
-      defaultAutoCompactionThreshold: { tokens: 850_000, percent: 85 },
+      autoCompactionEstimate: { tokens: 850_000, percent: 85, source: "default" },
       warningsEnabled: true,
       contextWarningPercent: 50,
     });
@@ -415,16 +413,16 @@ describe("compact status text", () => {
     expect(renderContextUsage(usage)).toBe("No completed response measurement · input window unknown · current model unknown · notices from 50% · no visible compaction");
   });
 
-  test("puts snapshot caveats and default-auto assumptions in the tool description", () => {
+  test("puts snapshot caveats and automatic-compaction assumptions in the tool description", () => {
     const description = contextStatusTool(new ContextWorld()).description;
     expect(description).toContain("Input-window usage drives plugin notices");
     expect(description).toContain("Later messages and pending tool or subagent results, including this call, are not included");
     expect(description).toContain("signed token headroom");
     expect(description).toContain("negative headroom means the measurement is past that point");
     expect(description).not.toMatch(/stale|earlier|unreliab/i);
-    expect(description).toContain("assumes automatic compaction is enabled");
-    expect(description).toContain("default buffer and no override");
-    expect(description).toContain("actual resolved automatic-compaction threshold is unavailable");
+    expect(description).toContain("assumes automatic compaction is on");
+    expect(description).toContain("compactionBuffer option, set to mirror OpenCode's compaction.buffer");
+    expect(description).toContain("otherwise assumes OpenCode's default buffer");
   });
 });
 
@@ -437,11 +435,11 @@ describe("the default-auto estimate", () => {
     [{ context: 30_000, input: 30_000, output: 1000 }, 25_500, 85, "25.5k (25.4k away)"],
   ] as const)("uses the default buffer for limits %p without claiming effective configuration", (limit, expectedTokens, expectedPercent, display) => {
     const usage = select([measured()], { models: [catalogModel(limit)] });
-    expect(usage.defaultAutoCompactionThreshold?.tokens).toBe(expectedTokens);
-    expect(usage.defaultAutoCompactionThreshold?.percent).toBeCloseTo(expectedPercent, 10);
-    expect(usage.defaultAutoCompactionHeadroomTokens).toBe(expectedTokens - 80);
-    expect(usage.autoCompactionThreshold).toBe("unknown");
-    expect(renderContextUsage(usage)).toContain(`default auto ~${display}`);
+    expect(usage.autoCompactionEstimate?.tokens).toBe(expectedTokens);
+    expect(usage.autoCompactionEstimate?.percent).toBeCloseTo(expectedPercent, 10);
+    expect(usage.autoCompactionHeadroomTokens).toBe(expectedTokens - 80);
+    expect(usage.autoCompactionEstimate?.source).toBe("default");
+    expect(renderContextUsage(usage)).toContain(`assumed default auto ~${display}`);
   });
 
   test.each([
@@ -451,53 +449,156 @@ describe("the default-auto estimate", () => {
   ])("retains the default estimate without a distance with $label", ({ messages, status }) => {
     const usage = select(messages, { models: [catalogModel({ context: 272_000, input: 272_000, output: 1000 })] });
     expect(usage.status).toBe(status);
-    expect(usage.defaultAutoCompactionThreshold).toEqual({ tokens: 231_200, percent: 85 });
-    expect(usage.autoCompactionThreshold).toBe("unknown");
+    expect(usage.autoCompactionEstimate).toEqual({ tokens: 231_200, percent: 85, source: "default" });
     expect(usage).not.toHaveProperty("reportedWindowPercent");
     expect(usage).not.toHaveProperty("inputHeadroomTokens");
-    expect(usage).not.toHaveProperty("defaultAutoCompactionHeadroomTokens");
+    expect(usage).not.toHaveProperty("autoCompactionHeadroomTokens");
     const text = renderContextUsage(usage);
-    expect(text).toContain(" · default auto ~231.2k · ");
+    expect(text).toContain(" · assumed default auto ~231.2k · ");
     expect(text).not.toMatch(/remaining|over input window|away|past estimate/);
   });
 
   test("omits the default estimate when the catalog cannot provide a positive window", () => {
     const usage = select([measured()], { models: [] });
-    expect(usage).not.toHaveProperty("defaultAutoCompactionThreshold");
-    expect(usage.autoCompactionThreshold).toBe("unknown");
+    expect(usage).not.toHaveProperty("autoCompactionEstimate");
     expect(renderContextUsage(usage)).not.toContain("auto ~");
+  });
+});
+
+describe("the configured automatic-compaction estimate", () => {
+  const HINT = "if compaction.buffer is set in OpenCode, set the plugin's compactionBuffer option to match";
+  const MILLION = { context: 1_000_000, input: 1_000_000, output: 10_000 };
+  const window = (size: number) => ({ context: size, input: size, output: 1000 });
+
+  test.each([
+    { label: "a whole percentage", limit: MILLION, buffer: "10%", expected: 900_000, percent: 90, display: "900k" },
+    { label: "a decimal percentage", limit: MILLION, buffer: "12.5%", expected: 875_000, percent: 87.5, display: "875k" },
+    // 12.54% and 12.56% of 1,000 are 125.4 and 125.6, which separate rounding from flooring and ceiling.
+    { label: "a percentage rounding down", limit: window(1000), buffer: "12.54%", expected: 875, percent: 87.5, display: "875" },
+    { label: "a percentage rounding up", limit: window(1000), buffer: "12.56%", expected: 874, percent: 87.4, display: "874" },
+    { label: "a percentage below the default's 16k minimum", limit: window(64_000), buffer: "1%", expected: 63_360, percent: 99, display: "63.4k" },
+    { label: "the largest whole percentage", limit: MILLION, buffer: "99%", expected: 10_000, percent: 1, display: "10k" },
+    { label: "a percentage of the smaller input limit", limit: { context: 1_000_000, input: 272_000, output: 1000 }, buffer: "10%", expected: 244_800, percent: 90, display: "244.8k" },
+    { label: "a token count", limit: MILLION, buffer: 50_000, expected: 950_000, percent: 95, display: "950k" },
+    { label: "a token count below the default's 16k minimum", limit: window(64_000), buffer: 1000, expected: 63_000, percent: 98.4375, display: "63k" },
+    { label: "a zero token count", limit: MILLION, buffer: 0, expected: 1_000_000, percent: 100, display: "1M" },
+    { label: "a token count one below the window", limit: MILLION, buffer: 999_999, expected: 1, percent: 0.0001, display: "1" },
+  ])("keeps $label free below the usable window", ({ limit, buffer, expected, percent, display }) => {
+    const usage = select([measured()], { models: [catalogModel(limit)], compactionBuffer: buffer });
+    expect(usage.autoCompactionEstimate?.tokens).toBe(expected);
+    expect(usage.autoCompactionEstimate?.percent).toBeCloseTo(percent, 10);
+    expect(usage.autoCompactionEstimate?.source).toBe("configured");
+    expect(usage.autoCompactionHeadroomTokens).toBe(expected - 80);
+    const text = renderContextUsage(usage);
+    expect(text).toContain(` · configured auto ~${display} (`);
+    expect(text).not.toContain("assumed default");
+    expect(text).not.toContain(HINT);
+  });
+
+  // OpenCode ignores a buffer that leaves no room in the window and applies its default instead.
+  test.each([
+    { label: "a token count equal to the window", limit: MILLION, buffer: 1_000_000, expected: 850_000, percent: 85, display: "850k" },
+    { label: "a token count above a 64k window", limit: window(64_000), buffer: 100_000, expected: 48_000, percent: 75, display: "48k" },
+    // 99.5% of 100 rounds to all 100 tokens.
+    { label: "a percentage that rounds to the whole window", limit: window(100), buffer: "99.5%", expected: 85, percent: 85, display: "85" },
+  ])("uses the default calculation for $label and reports the configured buffer as ignored", ({ limit, buffer, expected, percent, display }) => {
+    const usage = select([measured()], { models: [catalogModel(limit)], compactionBuffer: buffer });
+    expect(usage.autoCompactionEstimate).toEqual({ tokens: expected, percent, source: "configured-ignored" });
+    expect(usage.autoCompactionHeadroomTokens).toBe(expected - 80);
+    const text = renderContextUsage(usage);
+    expect(text).toContain(` · configured buffer ignored, default auto ~${display} (`);
+    expect(text).not.toContain(HINT);
+  });
+
+  test.each([
+    { label: "inside the estimate", reported: 850_300, headroom: 49_700, distance: "49.7k away" },
+    { label: "exactly at the estimate", reported: 900_000, headroom: 0, distance: "0 away" },
+    { label: "past the estimate", reported: 950_000, headroom: -50_000, distance: "50k past estimate" },
+  ])("reports signed headroom to a configured estimate $label", ({ reported, headroom, distance }) => {
+    const usage = select([measured("msg_configured", tokens({ input: reported }))], {
+      models: [catalogModel(MILLION)], compactionBuffer: "10%",
+    });
+    expect(usage.autoCompactionHeadroomTokens).toBe(headroom);
+    expect(renderContextUsage(usage)).toContain(` · configured auto ~900k (${distance}) · no visible compaction`);
+  });
+
+  test("keeps a configured estimate without a distance when the measurement is from another model", () => {
+    const other = measured("msg_other_model", tokens({ input: 850_300 }), { model: { providerID: "other", id: "model" } });
+    const usage = select([other], { models: [catalogModel(MILLION)], compactionBuffer: "10%" });
+    expect(usage.status).toBe("different-model");
+    expect(usage.autoCompactionEstimate).toEqual({ tokens: 900_000, percent: 90, source: "configured" });
+    expect(usage).not.toHaveProperty("autoCompactionHeadroomTokens");
+    const text = renderContextUsage(usage);
+    expect(text).toContain(" · configured auto ~900k · ");
+    expect(text).not.toMatch(/away|past estimate/);
+  });
+
+  test("omits a configured estimate when the window is unknown", () => {
+    const usage = select([measured()], { models: [], compactionBuffer: "10%" });
+    expect(usage).not.toHaveProperty("autoCompactionEstimate");
+    expect(usage).not.toHaveProperty("autoCompactionHeadroomTokens");
+    const text = renderContextUsage(usage);
+    expect(text).not.toContain("auto ~");
+    expect(text).not.toContain(HINT);
+  });
+
+  test("the status tool applies its compactionBuffer option to the line and the structured result", async () => {
+    const world = new ContextWorld([measured("msg_configured", tokens({ input: 850_300 })), current()]);
+    world.models.catalogs.set("/work", [catalogModel(MILLION)]);
+    const result = await contextStatusTool(world, { compactionBuffer: "10%" }).execute({}, toolContext());
+    expect(result.content).toBe("850.3k / 1M input (85.03%) · 149.7k remaining · measured 1970-01-01T00:00:00Z · notices from 50% · configured auto ~900k (49.7k away) · no visible compaction");
+    expect(result.output).toMatchObject({
+      autoCompactionEstimate: { tokens: 900_000, percent: 90, source: "configured" },
+      autoCompactionHeadroomTokens: 49_700,
+      inputHeadroomTokens: 149_700,
+    });
+  });
+
+  test("the status tool assumes the default buffer and adds the hint when its option is passed as undefined", async () => {
+    const world = new ContextWorld([measured("msg_default", tokens({ input: 750_000 })), current()]);
+    world.models.catalogs.set("/work", [catalogModel(MILLION)]);
+    const result = await contextStatusTool(world, { compactionBuffer: undefined }).execute({}, toolContext());
+    expect(result.content).toContain(` · assumed default auto ~850k (100k away) · ${HINT} · `);
+    expect(result.output?.autoCompactionEstimate).toEqual({ tokens: 850_000, percent: 85, source: "default" });
+  });
+
+  test("the status tool description plans against the estimate without a fixed utilization goal", () => {
+    const description = contextStatusTool(new ContextWorld()).description;
+    expect(description).toContain("continue while the next step and its expected output fit before that point");
+    expect(description).not.toMatch(/90%|\bgoal\b|roughly/i);
   });
 });
 
 describe("signed token headroom", () => {
   const MILLION = { context: 1_000_000, input: 1_000_000, output: 10_000 };
+  const HINT = "if compaction.buffer is set in OpenCode, set the plugin's compactionBuffer option to match";
 
   test.each([
     {
       label: "inside both", reported: 750_000, input: 250_000, auto: 100_000,
-      text: "750k / 1M input (75%) · 250k remaining · measured 1970-01-01T00:00:00Z · notices from 75% · default auto ~850k (100k away) · no visible compaction",
+      text: `750k / 1M input (75%) · 250k remaining · measured 1970-01-01T00:00:00Z · notices from 75% · assumed default auto ~850k (100k away) · ${HINT} · no visible compaction`,
     },
     {
       label: "exactly at the estimate", reported: 850_000, input: 150_000, auto: 0,
-      text: "850k / 1M input (85%) · 150k remaining · measured 1970-01-01T00:00:00Z · notices from 75% · default auto ~850k (0 away) · no visible compaction",
+      text: `850k / 1M input (85%) · 150k remaining · measured 1970-01-01T00:00:00Z · notices from 75% · assumed default auto ~850k (0 away) · ${HINT} · no visible compaction`,
     },
     {
       label: "exactly at the window", reported: 1_000_000, input: 0, auto: -150_000,
-      text: "1M / 1M input (100%) · 0 remaining · measured 1970-01-01T00:00:00Z · notices from 75% · default auto ~850k (150k past estimate) · no visible compaction",
+      text: `1M / 1M input (100%) · 0 remaining · measured 1970-01-01T00:00:00Z · notices from 75% · assumed default auto ~850k (150k past estimate) · ${HINT} · no visible compaction`,
     },
     {
       label: "past the window", reported: 1_050_000, input: -50_000, auto: -200_000,
-      text: "1.05M / 1M input (105%) · 50k over input window · measured 1970-01-01T00:00:00Z · notices from 75% · default auto ~850k (200k past estimate) · no visible compaction",
+      text: `1.05M / 1M input (105%) · 50k over input window · measured 1970-01-01T00:00:00Z · notices from 75% · assumed default auto ~850k (200k past estimate) · ${HINT} · no visible compaction`,
     },
   ])("reports signed distances without clamping when $label", ({ reported, input, auto, text }) => {
     const usage = select([measured("msg_headroom", tokens({ input: reported }))], {
       models: [catalogModel(MILLION)], warningPercent: 75,
     });
     expect(usage.inputHeadroomTokens).toBe(input);
-    expect(usage.defaultAutoCompactionHeadroomTokens).toBe(auto);
+    expect(usage.autoCompactionHeadroomTokens).toBe(auto);
     expect(usage.measurement?.reportedTokens).toBe(reported);
     expect(usage.reportedWindowPercent).toBe(reported / 10_000);
-    expect(usage.defaultAutoCompactionThreshold).toEqual({ tokens: 850_000, percent: 85 });
+    expect(usage.autoCompactionEstimate).toEqual({ tokens: 850_000, percent: 85, source: "default" });
     expect(renderContextUsage(usage)).toBe(text);
   });
 
@@ -507,7 +608,7 @@ describe("signed token headroom", () => {
   ] as const)("measures input headroom against the usable window with %s", (_, limit, text) => {
     const usage = select([measured()], { models: [catalogModel(limit)] });
     expect(usage.inputHeadroomTokens).toBe(20);
-    expect(usage.defaultAutoCompactionHeadroomTokens).toBe(5);
+    expect(usage.autoCompactionHeadroomTokens).toBe(5);
     expect(renderMeasurement(usage)).toContain(text);
   });
 
@@ -519,7 +620,7 @@ describe("signed token headroom", () => {
       ],
     });
     expect(usage.inputHeadroomTokens).toBe(20);
-    expect(usage.defaultAutoCompactionHeadroomTokens).toBe(5);
+    expect(usage.autoCompactionHeadroomTokens).toBe(5);
   });
 
   test.each([
@@ -532,11 +633,11 @@ describe("signed token headroom", () => {
       sessionID: SESSION, messageID: CURRENT, messages, models, ...(revert === undefined ? {} : { revert }),
     });
     expect(usage).not.toHaveProperty("inputHeadroomTokens");
-    expect(usage).not.toHaveProperty("defaultAutoCompactionHeadroomTokens");
-    expect(usage.defaultAutoCompactionThreshold !== undefined).toBe(estimate);
+    expect(usage).not.toHaveProperty("autoCompactionHeadroomTokens");
+    expect(usage.autoCompactionEstimate !== undefined).toBe(estimate);
     const text = renderContextUsage(usage);
     expect(text).not.toMatch(/remaining|over input window|away|past estimate/);
-    if (estimate) expect(text).toContain(" · default auto ~85 · ");
+    if (estimate) expect(text).toContain(" · assumed default auto ~85 · ");
   });
 });
 
@@ -632,7 +733,6 @@ describe("fresh self-scoped reads", () => {
     expect(result.output).toMatchObject({
       warningsEnabled: false,
       contextWarningPercent: 82.5,
-      autoCompactionThreshold: "unknown",
       status: "available",
       reportedContextPercent: 40,
       reportedWindowPercent: 80,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
+import { Schema } from "effect";
 import {
   CompactionError,
   isSelfCompactionID,
@@ -140,18 +141,40 @@ describe("self-compaction admission", () => {
 });
 
 describe("handoff validation and admission failures", () => {
-  test.each([["empty", ""], ["too long", "x".repeat(8001)]])("rejects a %s handoff before either admission", async (_, handoff) => {
+  test.each([["empty", ""], ["too long", "x".repeat(16_001)]])("rejects a %s handoff before either admission", async (_, handoff) => {
     const world = setup();
     await expect(world.request(handoff)).rejects.toBeInstanceOf(CompactionError);
     expect(world.compactor.requests).toEqual([]);
     expect(world.messenger.posts).toEqual([]);
   });
 
-  test.each([["one character", "x"], ["8000 astral characters", "😀".repeat(8000)]])("accepts %s and preserves the handoff content", async (_, handoff) => {
+  test.each([["one character", "x"], ["16000 astral characters", "😀".repeat(16_000)]])("accepts %s and preserves the handoff content", async (_, handoff) => {
     const world = setup();
     const result = await world.request(handoff);
     expect(result.handoff.status).toBe("stored");
     expect(world.messenger.posts[0]?.text.endsWith(`\n\n${handoff}`)).toBe(true);
+  });
+
+  // Astral characters are two UTF-16 units each, so the reported length shows code points are counted.
+  test.each([
+    ["21,105 astral characters", "😀".repeat(21_105), "handoff is 21,105 characters; the limit is 16,000 (5,105 over). Nothing was requested."],
+    ["one character over", `${"x".repeat(15_999)}😀😀`, "handoff is 16,001 characters; the limit is 16,000 (1 over). Nothing was requested."],
+  ])("refuses %s with the length, limit and overage", async (_, handoff, message) => {
+    const world = setup();
+    const error = await world.request(handoff).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CompactionError);
+    expect((error as Error).message).toBe(message);
+    expect(world.compactor.requests).toEqual([]);
+    expect(world.messenger.posts).toEqual([]);
+  });
+
+  test("gives an empty handoff its own error", async () => {
+    const world = setup();
+    const error = await world.request("").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CompactionError);
+    expect((error as Error).message).toMatch(/^handoff is empty\b/);
+    expect((error as Error).message).not.toMatch(/ over\)|the limit is/);
+    expect((error as Error).message.endsWith("Nothing was requested.")).toBe(true);
   });
 
   test.each([new Error("host unavailable"), "host unavailable"])(
@@ -234,6 +257,20 @@ describe("the direct compaction tool", () => {
     expect(tool.options).toMatchObject({ codemode: false, permission: "context_compact" });
     expect(result.content).toContain("msg_admitted");
     expect(result.content).toContain("msg_posted_1");
+  });
+
+  test("refuses an over-limit handoff as a tool error with the length message and requests nothing", async () => {
+    const world = setup();
+    const error = await contextCompactTool(world).execute({ handoff: "x".repeat(21_105) }, toolContext()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ToolError);
+    expect((error as Error).message).toBe("handoff is 21,105 characters; the limit is 16,000 (5,105 over). Nothing was requested.");
+    expect(world.compactor.requests).toEqual([]);
+    expect(world.messenger.posts).toEqual([]);
+  });
+
+  test("states the 16,000-character handoff limit in the input description", () => {
+    const schema = Schema.toJsonSchemaDocument(contextCompactTool(setup()).input).schema;
+    expect(schema).toMatchObject({ properties: { handoff: { description: expect.stringContaining("1 to 16,000 characters") } } });
   });
 
   test("turns admission failure into a tool error", async () => {

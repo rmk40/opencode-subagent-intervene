@@ -7,6 +7,7 @@ import {
   requestSelfCompaction,
   type CompactionDeps,
 } from "@/core/compaction";
+import { formatCount } from "@/core/errors";
 
 export const NAME = COMPACT_TOOL_NAME;
 export const DESCRIPTION =
@@ -14,7 +15,7 @@ export const DESCRIPTION =
 
 export const Input = Schema.Struct({
   handoff: Schema.optionalKey(Schema.String).annotate({
-    description: `Agent-written working notes of 1 to ${HANDOFF_MAX_CODE_POINTS} characters, kept as an ordinary synthetic message.`,
+    description: `Agent-written working notes of 1 to ${formatCount(HANDOFF_MAX_CODE_POINTS)} characters, kept as an ordinary synthetic message.`,
   }),
 });
 

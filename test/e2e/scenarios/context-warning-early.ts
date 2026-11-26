@@ -9,8 +9,8 @@ import {
   waitIdle,
 } from "../harness";
 import {
+  autoEstimateWithDistance,
   contextPlugins,
-  defaultAutoWithDistance,
   measurementScope,
   noticeHasPlanningGuidance,
   object,
@@ -246,8 +246,8 @@ const run = (configuration: (typeof configurations)[number]) => {
         checks.allStagesIncludeDefaultAutoEstimate = latest.every(
           (item) =>
             typeof item.text === "string" &&
-            item.text.includes("default auto ~170k (") &&
-            defaultAutoWithDistance.test(item.text),
+            item.text.includes("assumed default auto ~170k (") &&
+            autoEstimateWithDistance.test(item.text),
         );
         checks.descriptionsNameFactualMilestone = latest.every(
           (item) =>

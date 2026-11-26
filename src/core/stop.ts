@@ -40,8 +40,12 @@ export const CONTINUE_OWN_NOTE =
 export const CONTINUE_NESTED_NOTE =
   "Subagents launched by your subagents can only be continued by their own parent.";
 
-/** Shown with every result that stopped something; the native notices it mentions are not ours. */
-export const STOPPED_NOTE = `If you launched any of these in the background, you may also get a native notice saying cancelled, or completed if it finished first. It only confirms this result; do not relaunch the work or report it twice. ${CONTINUE_OWN_NOTE} ${CONTINUE_NESTED_NOTE}`;
+/**
+ * Shown with every result that stopped something; the native notices it mentions are not ours.
+ * Some hosts report every run a subagent ends to its parent, so a run the latch stops later, after
+ * a notice woke the subagent, sends the parent another cancelled notice.
+ */
+export const STOPPED_NOTE = `OpenCode may also send you notices saying these subagents were cancelled, or completed if one finished first, including later ones while they stay stopped. They only confirm this result; do not relaunch the work or report it twice. ${CONTINUE_OWN_NOTE} ${CONTINUE_NESTED_NOTE}`;
 
 export const NOTHING_RUNNING_NOTE =
   "None of your subagents is running, so nothing was stopped.";
@@ -56,6 +60,7 @@ export const NOTHING_FOUND_RUNNING_NOTE =
  * - `deleted`: the session was deleted during the stop.
  * - `continued`: someone gave it new work while the stop ran; it was left alone.
  * - `stopping`: still running when the bounded wait ended.
+ * - `no_recorded_end`: OpenCode reports it idle, but its last run recorded no end.
  * - `stopped`: a run ended interrupted during the stop.
  * - `finished`: a run ended on its own (succeeded or failed) during the stop.
  * - `already_idle`: no run ended during the stop.
@@ -64,6 +69,7 @@ export type NodeResult =
   | "deleted"
   | "continued"
   | "stopping"
+  | "no_recorded_end"
   | "stopped"
   | "finished"
   | "already_idle";
@@ -110,7 +116,9 @@ export interface StopDeps {
   readonly reader: SessionReader;
   readonly control: SessionControl;
   readonly latch: Pick<Latch, "add" | "owe" | "isActive" | "isLifted">;
-  readonly runState: Pick<RunStateTracker, "observeAll">;
+  /** Without `mark` and `settled`, the settle waits are not used as evidence of the run state. */
+  readonly runState: Pick<RunStateTracker, "observeAll"> &
+    Partial<Pick<RunStateTracker, "mark" | "settled">>;
   readonly clock: Clock;
   readonly logger: Logger;
 }
@@ -217,6 +225,9 @@ export async function stopSubagents(
   // out of every later wait and retry.
   const released = new Set<SessionID>();
   const ours = (node: Descendant) => !released.has(node.id);
+  // Sessions an interrupt found running. Their terminal events can arrive after a settle wait
+  // resolves, so the wait is not evidence that their end went unrecorded.
+  const interrupted = new Set<SessionID>();
 
   /** Interrupts the node unless someone continued it since this stop latched it. */
   const interruptIfStillOurs = async (node: Descendant): Promise<void> => {
@@ -226,7 +237,7 @@ export async function stopSubagents(
     }
     if (!live()) return;
     try {
-      await deps.control.interrupt(node.id);
+      if (await deps.control.interrupt(node.id)) interrupted.add(node.id);
     } catch (error) {
       // A session deleted meanwhile rejects here; classification reports it.
       deps.logger.warn("stop: interrupt failed", {
@@ -244,7 +255,7 @@ export async function stopSubagents(
 
   for (let round = 0; round < SETTLE_ROUNDS; round++) {
     if (!live()) return cancelled("settle");
-    await settle(deps, nodes.filter(ours), settleMs, signal);
+    await settle(deps, nodes.filter(ours), settleMs, signal, interrupted);
     if (!live()) return cancelled("settle");
     // Sessions launched below a released session belong to whoever continued it, so the walk does
     // not descend through released sessions. A session continued while idle gets no interrupt
@@ -318,7 +329,7 @@ function validate(request: StopRequest): Selector {
       "Pass sessionIDs with the subagents to stop, or all: true to stop every running one.",
     );
   }
-  const unique = [...new Set(ids)];
+  const unique = [...new Set(ids.map((id) => id.trim()))];
   if (unique.length > MAX_TARGETS) {
     throw new StopInputError(
       `Pass at most ${MAX_TARGETS} sessionIDs; nothing was changed.`,
@@ -372,12 +383,17 @@ function distinctAgents(roots: readonly Descendant[]): string[] {
   return [...new Set(roots.map((root) => root.info.agent ?? UNKNOWN_AGENT))];
 }
 
-/** Waits until every node is idle, `ms` passes, or the call is cancelled. Never rejects. */
+/**
+ * Waits until every node is idle, `ms` passes, or the call is cancelled. Never rejects. A wait
+ * that resolves shows the node had no execution left, which the run-state tracker takes as
+ * evidence, except for nodes in `interrupted`, whose interrupt found a run.
+ */
 async function settle(
   deps: StopDeps,
   nodes: readonly Descendant[],
   ms: number,
   signal: AbortSignal,
+  interrupted: ReadonlySet<SessionID>,
 ): Promise<void> {
   const timer = new AbortController();
   const stop = () => timer.abort();
@@ -385,11 +401,19 @@ async function settle(
   try {
     await Promise.race([
       Promise.all(
-        nodes.map((node) =>
-          Promise.resolve()
+        nodes.map((node) => {
+          const mark = deps.runState.mark?.(node.id);
+          return Promise.resolve()
             .then(() => deps.control.waitIdle(node.id))
-            .catch(() => undefined),
-        ),
+            .then(
+              () => {
+                if (!interrupted.has(node.id)) {
+                  deps.runState.settled?.(node.id, mark);
+                }
+              },
+              () => undefined,
+            );
+        }),
       ),
       deps.clock.sleep(ms, timer.signal),
     ]);
@@ -429,8 +453,12 @@ async function classifyAll(
   latching: boolean,
 ): Promise<StoppedNode[]> {
   // Session state is read after this probe, so `time.idle` and `outcome` describe the run that the
-  // probe saw end, not an earlier one.
-  const observed = await deps.runState.observeAll(nodes.map((node) => node.id));
+  // probe saw end, not an earlier one. The infos from the walk let a probe that finds a node idle
+  // tell from storage whether its last run recorded an end.
+  const observed = await deps.runState.observeAll(
+    nodes.map((node) => node.id),
+    new Map(nodes.map((node) => [node.id, node.info])),
+  );
   const shallowestFirst = nodes.toSorted((a, b) => a.depth - b.depth);
   return Promise.all(
     shallowestFirst.map(async (node) => {
@@ -438,11 +466,12 @@ async function classifyAll(
         deps.reader.get(node.id),
         latching ? deps.latch.isLifted(node.id, generation) : false,
       ]);
-      const state = observed.get(node.id)?.state ?? "unknown";
+      const observation = observed.get(node.id);
       const result = classify(
         info,
         lifted,
-        state !== "idle",
+        (observation?.state ?? "unknown") !== "idle",
+        observation?.noRecordedEnd === true,
         idleBefore.get(node.id),
       );
       return describeNode(node, info ?? node.info, result);
@@ -454,11 +483,13 @@ function classify(
   info: SessionInfo | undefined,
   lifted: boolean,
   busy: boolean,
+  noRecordedEnd: boolean,
   idleBefore: number | undefined,
 ): NodeResult {
   if (info === undefined) return "deleted";
   if (lifted) return "continued";
   if (busy) return "stopping";
+  if (noRecordedEnd) return "no_recorded_end";
   // Core advances `time.idle` strictly on every terminal transition and can run it ahead of the
   // wall clock, so only a comparison with the value captured before the stop is reliable.
   if (info.time.idle !== idleBefore) {
