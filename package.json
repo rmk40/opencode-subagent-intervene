@@ -1,6 +1,6 @@
 {
   "name": "opencode-subagent-intervene",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "OpenCode plugin to stop, steer and monitor subagents, report context usage and let agents request their own compaction",
   "keywords": [
     "opencode",
