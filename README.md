@@ -10,10 +10,13 @@ An [OpenCode](https://opencode.ai) plugin that lets an agent stop and steer its 
 check their progress and manage its own context usage and compaction.
 
 OpenCode 2 lets an agent hand work to subagents, including background ones that keep going while
-the parent does something else. It gives the parent no way to stop one. A person can press `ctrl+d`
-in the TUI's Subagents tab or use the stop button in the web app, but the agent can't, so an agent
-working on its own has to wait out a subagent that went the wrong way, or stop everything. This
-plugin adds that control, plus the visibility an agent needs to use it well.
+the parent does something else. A person can stop one by pressing `ctrl+d` in the TUI's Subagents
+tab or with the stop button in the web app. On a default install the agent can't, so an agent
+working on its own has to wait out a subagent that went the wrong way, or stop everything.
+OpenCode 2.4 added a Code Mode tool that interrupts a session, but it sits behind an experimental
+flag and doesn't keep the session stopped (see
+[How does this compare with `opencode.session.interrupt`?](#how-does-this-compare-with-opencodesessioninterrupt)).
+This plugin adds that control, plus the visibility an agent needs to use it well.
 
 ## Why you'd want it
 
@@ -691,6 +694,20 @@ subagent's session ID and a reason, or with `all: true` to stop every running on
 press `ctrl+d` in the TUI's Subagents tab or use the stop button in the web app; the plugin gives
 the agent the same control, and keeps the subagent from being woken up again afterwards.
 
+### How does this compare with `opencode.session.interrupt`?
+
+OpenCode 2.4 added `opencode.session.interrupt`, a Code Mode tool that interrupts a session and
+every session below it and cancels their background shells. Release builds offer it only when the
+experimental `full_codemode` flag is on, set with `experimental.full_codemode: true` in your config
+or `OPENCODE_FLAGS=full_codemode`. It interrupts once. It doesn't keep the session stopped when
+background work wakes it, tell the session why it was stopped or report a result for each session.
+It accepts any session except the caller and the sessions above it.
+
+Use `subagent_stop` when the subagent should stay stopped until someone continues it, or when you
+want the reason passed on and a result for each session. Use `opencode.session.interrupt` when its
+background shells must be cancelled too, which a plugin can't do. Calling `subagent_stop` on a
+subagent the native tool already interrupted keeps it stopped from then on.
+
 ### How do I send a running subagent new instructions?
 
 Call `subagent_send` with its session ID and the message. The subagent reads it once its current
@@ -719,7 +736,8 @@ were called tasks and plugins use a different API.
 - **Background shells keep running.** A shell a subagent started in the background isn't cancelled
   when the subagent stops; OpenCode gives plugins no way to do that
   ([#60107](https://github.com/anomalyco/opencode/issues/60107)). When the shell finishes and wakes
-  the subagent, the plugin stops that run.
+  the subagent, the plugin stops that run. With the `full_codemode` flag on, OpenCode's own
+  `opencode.session.interrupt` cancels these shells.
 - **The parent hears about each run the plugin stops.** From OpenCode 2.3, OpenCode reports every
   run of a subagent that ends to its parent. Plugins can't hold that report back. Each run the
   plugin stops in a stopped subagent sends the parent another cancelled notice. An idle parent
@@ -814,8 +832,9 @@ were called tasks and plugins use a different API.
   read OpenCode's list of open prompts, which covers only the project that copy of the plugin runs
   in. For a subagent moved to another project they can show none, while the notice still arrives.
 - **Inspect can't read before the last compaction.** Only the summary written at the compaction is
-  available; older messages aren't readable from a plugin. Inspect also can't show a running
-  command's output so far.
+  available; older messages aren't readable from a plugin. With OpenCode's experimental
+  `sqlite_fts` flag on, OpenCode 2.4's own `opencode.session.read` reads a session's messages from
+  before its compaction. Inspect also can't show a running command's output so far.
 - **Cost can read 0.** Providers that report no pricing, which is common with subscription sign-ins,
   leave `cost` at 0, shown as `no cost reported`. Token counts are still real.
 
