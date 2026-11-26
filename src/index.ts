@@ -448,6 +448,8 @@ export default Plugin.define({
               {
                 reader: host.reader,
                 messenger: host.messenger,
+                switcher: host.switcher,
+                assertSubagent: host.assertSubagent,
                 latch,
                 runState,
                 clock: host.clock,

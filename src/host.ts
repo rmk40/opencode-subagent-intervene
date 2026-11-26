@@ -19,8 +19,11 @@ import {
   type SessionInstructionEntries,
   type SessionMessenger,
   type SessionReader,
+  type SessionSwitcher,
   type Store,
 } from "@/core/ports";
+import type { SubagentPermissionRequest } from "@/tools/send";
+import { TOOL_PERMISSION } from "@/tools/shared";
 import type { StopPermissionRequest } from "@/tools/stop";
 
 /** Children per `session.list` page. */
@@ -37,6 +40,7 @@ export interface Host {
   readonly control: SessionControl;
   readonly permissions: PermissionReader;
   readonly messenger: SessionMessenger;
+  readonly switcher: SessionSwitcher;
   readonly instructions: SessionInstructionEntries;
   readonly store: Store;
   readonly clock: Clock;
@@ -52,6 +56,12 @@ export interface Host {
    * or a refusal rejects, and the rejection must propagate out of the tool.
    */
   readonly assertStop: (request: StopPermissionRequest) => Promise<void>;
+  /**
+   * Asks for the `subagent` permission on the agent a subagent is switched to, as OpenCode's own
+   * `subagent` tool does before it runs an agent as a subagent. Resolves when allowed; a deny rule or
+   * a refusal rejects, and the rejection must propagate out of the tool.
+   */
+  readonly assertSubagent: (request: SubagentPermissionRequest) => Promise<void>;
 }
 
 export function createHost(ctx: Plugin.Context, logger: Logger): Host {
@@ -82,6 +92,7 @@ export function createHost(ctx: Plugin.Context, logger: Logger): Host {
       },
     },
     messenger: sessionMessenger(ctx),
+    switcher: sessionSwitcher(ctx),
     instructions: {
       list: (sessionID) => ctx.session.instructions.entry.list({ sessionID }),
       put: (input) => ctx.session.instructions.entry.put(input),
@@ -93,18 +104,57 @@ export function createHost(ctx: Plugin.Context, logger: Logger): Host {
     logger,
     waitAvailable,
     assertStop: (request) =>
-      ctx.permission.assert({
-        action: STOP_PERMISSION,
-        resources: [request.rootAgent],
-        save: [request.rootAgent],
-        sessionID: request.sessionID,
-        agent: request.agent,
-        source: {
-          type: "tool",
-          messageID: request.messageID,
-          id: request.callID,
-        },
-      }),
+      assertToolPermission(ctx, STOP_PERMISSION, request.rootAgent, request),
+    assertSubagent: (request) =>
+      assertToolPermission(ctx, TOOL_PERMISSION, request.subagent, request),
+  };
+}
+
+/**
+ * Asserts `action` on one resource for a tool call, and saves an "always" answer for that
+ * resource. OpenCode asks a person only when the caller's rules say to ask.
+ */
+function assertToolPermission(
+  ctx: Plugin.Context,
+  action: string,
+  resource: string,
+  call: {
+    readonly sessionID: string;
+    readonly agent: string;
+    readonly messageID: string;
+    readonly callID: string;
+  },
+): Promise<void> {
+  return ctx.permission.assert({
+    action,
+    resources: [resource],
+    save: [resource],
+    sessionID: call.sessionID,
+    agent: call.agent,
+    source: { type: "tool", messageID: call.messageID, id: call.callID },
+  });
+}
+
+/**
+ * Reads this instance's own catalog. `ctx.model.list` returns it whatever location it is given, so
+ * neither list is asked for another location. Like the other adapters, it reads `ctx` only on use.
+ */
+function sessionSwitcher(ctx: Plugin.Context): SessionSwitcher {
+  return {
+    get directory() {
+      return ctx.location.directory;
+    },
+    async agents() {
+      return (await ctx.agent.list()).data;
+    },
+    async models(types) {
+      return (await ctx.model.list(types === undefined ? {} : { types }))
+        .data;
+    },
+    switchAgent: (sessionID, agent) =>
+      ctx.session.switchAgent({ sessionID, agent }),
+    switchModel: (sessionID, model) =>
+      ctx.session.switchModel({ sessionID, model }),
   };
 }
 

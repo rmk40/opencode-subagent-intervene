@@ -18,6 +18,7 @@ import type { RunStateTracker } from "@/core/run-state";
 import { EmptyReasonError } from "@/core/sanitize";
 import { StopInputError } from "@/core/stop";
 import { formatDuration } from "@/core/summarize";
+import { formatModelRef } from "@/core/switch";
 import {
   closestChildren,
   describeSuggestions,
@@ -251,11 +252,7 @@ export function renderStopped(stopped: StopDescription): string {
 
 /** `providerID/modelID#variant`. */
 export function modelName(info: SessionInfo): string | undefined {
-  if (info.model === undefined) return undefined;
-  const base = `${info.model.providerID}/${info.model.id}`;
-  return info.model.variant === undefined
-    ? base
-    : `${base}#${info.model.variant}`;
+  return info.model === undefined ? undefined : formatModelRef(info.model);
 }
 
 /** ` (agent, "title")`, or an empty string when the session has neither. */

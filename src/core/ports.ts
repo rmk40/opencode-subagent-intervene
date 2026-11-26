@@ -2,14 +2,16 @@
 // `src/host.ts` implements them over `ctx`; unit tests implement them with fakes.
 
 import type {
+  AgentInfo,
   JsonValue,
   ModelInfo,
+  ModelRef,
   OpenCodeEvent,
   SessionInfo,
   SessionMessageInfo,
 } from "@opencode/client";
 
-export type { OpenCodeEvent, SessionInfo, SessionMessageInfo };
+export type { ModelRef, OpenCodeEvent, SessionInfo, SessionMessageInfo };
 
 export type SessionID = string;
 
@@ -47,6 +49,37 @@ export type ContextModel = Pick<ModelInfo, "id" | "providerID" | "limit">;
 /** Reads the catalog in the session's location, which can differ from the plugin's. */
 export interface ModelReader {
   list(directory: string): Promise<readonly ContextModel[]>;
+}
+
+/** An agent in a location's catalog, with what a switch to it checks. */
+export type CatalogAgent = Pick<AgentInfo, "id" | "mode" | "hidden" | "model">;
+
+/** A model in a location's catalog, with what a switch to it checks. */
+export type CatalogModel = Pick<ModelInfo, "id" | "providerID" | "type"> & {
+  readonly variants: ReadonlyArray<{ readonly id: string }>;
+};
+
+/**
+ * Reads the agents and models a session can switch to, and switches it. OpenCode reads a session's
+ * agent and model at the start of every step and every retry, so a switch reaches a running session
+ * at its next model request.
+ */
+export interface SessionSwitcher {
+  /**
+   * The directory of this plugin instance's location, the only one whose catalog `agents` and
+   * `models` read: OpenCode's plugin model list ignores the location it is given.
+   */
+  readonly directory: string;
+  agents(): Promise<readonly CatalogAgent[]>;
+  /** Enabled models of `types`; chat models, the only ones a session can run, when absent. */
+  models(types?: readonly string[]): Promise<readonly CatalogModel[]>;
+  /** Records `agent` as the session's agent. OpenCode does not check that it exists. */
+  switchAgent(sessionID: SessionID, agent: string): Promise<void>;
+  /**
+   * Records `model` as the session's model. OpenCode does not check that it is available, and
+   * records nothing when it equals the current model.
+   */
+  switchModel(sessionID: SessionID, model: ModelRef): Promise<void>;
 }
 
 export interface CompactionAdmission {

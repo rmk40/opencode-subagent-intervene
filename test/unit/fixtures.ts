@@ -1,9 +1,12 @@
 // In-memory fakes for the core ports and typed builders for sessions and events.
 
 import type {
+  CatalogAgent,
+  CatalogModel,
   Clock,
   Json,
   Logger,
+  ModelRef,
   OpenCodeEvent,
   PermissionReader,
   Scheduler,
@@ -13,6 +16,7 @@ import type {
   SessionMessageInfo,
   SessionMessenger,
   SessionReader,
+  SessionSwitcher,
   Store,
   SyntheticMessage,
 } from "@/core/ports";
@@ -179,6 +183,42 @@ export class RecordingMessenger implements SessionMessenger {
       id: message.id ?? `msg_posted_${this.posts.length}`,
       createdAt: this.createdAt,
     };
+  }
+}
+
+/** Catalogs to switch to, and every switch made. Each entry of `failing` makes that call reject. */
+export class RecordingSwitcher implements SessionSwitcher {
+  /** The plugin instance's directory; `sessionInfo` puts sessions here by default. */
+  directory = "/work";
+  agentCatalog: CatalogAgent[] = [];
+  /** Chat models, listed when no type is asked for. */
+  chatModels: CatalogModel[] = [];
+  /** Models of other types, listed when types are asked for. */
+  otherModels: CatalogModel[] = [];
+  readonly switches: Array<
+    | { readonly sessionID: SessionID; readonly agent: string }
+    | { readonly sessionID: SessionID; readonly model: ModelRef }
+  > = [];
+  readonly failing = new Set<keyof SessionSwitcher>();
+
+  async agents(): Promise<readonly CatalogAgent[]> {
+    if (this.failing.has("agents")) throw new Error("agents failed");
+    return this.agentCatalog;
+  }
+
+  async models(types?: readonly string[]): Promise<readonly CatalogModel[]> {
+    if (this.failing.has("models")) throw new Error("models failed");
+    return types === undefined ? this.chatModels : this.otherModels;
+  }
+
+  async switchAgent(sessionID: SessionID, agent: string): Promise<void> {
+    if (this.failing.has("switchAgent")) throw new Error("switchAgent failed");
+    this.switches.push({ sessionID, agent });
+  }
+
+  async switchModel(sessionID: SessionID, model: ModelRef): Promise<void> {
+    if (this.failing.has("switchModel")) throw new Error("switchModel failed");
+    this.switches.push({ sessionID, model });
   }
 }
 

@@ -29,6 +29,7 @@ import {
   MemoryStore,
   RecordingLogger,
   RecordingMessenger,
+  RecordingSwitcher,
   sessionInfo,
 } from "./fixtures";
 
@@ -80,6 +81,7 @@ export class ToolWorld {
   readonly logger = new RecordingLogger();
   readonly store: MemoryStore;
   readonly messenger = new RecordingMessenger();
+  readonly switcher = new RecordingSwitcher();
   readonly activity = new ActivityTracker();
   readonly runState: RunStateTracker;
   readonly latch: Latch;
@@ -180,6 +182,8 @@ export class ToolWorld {
       sendTool({
         reader: this.reader,
         messenger: this.messenger,
+        switcher: this.switcher,
+        assertSubagent: async () => {},
         latch: this.latch,
         runState: this.runState,
         clock: this.clock,

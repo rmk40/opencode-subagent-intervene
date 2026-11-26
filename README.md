@@ -39,7 +39,8 @@ A few things make that work in practice:
   ended, and what they cost.
 - **The parent can redirect without stopping.** `subagent_send` puts a message in a running
   subagent's queue. The subagent reads it as soon as its current tool calls finish, and nothing it
-  was doing is thrown away.
+  was doing is thrown away. The same call can move the subagent to another model or agent from its
+  next model request.
 - **The parent hears when a subagent is stuck.** A subagent waiting on a permission prompt or a
   question can sit there for hours if nobody is watching. After a minute, the plugin tells the
   parent, which can then tell you or stop it. A subagent that shows no progress for ten minutes
@@ -94,7 +95,7 @@ opens loads its own copy of the plugin, and a stop is only kept while at least o
 | Tool                | How the model calls it          | What it does                                                                                       |
 | ------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `subagent_stop`     | Direct tool, next to `subagent` | Stops subagents and everything they launched                                                       |
-| `subagent_send`     | Direct tool, next to `subagent` | Sends a running subagent a message without stopping it                                             |
+| `subagent_send`     | Direct tool, next to `subagent` | Sends a running subagent a message or switches its model or agent without stopping it              |
 | `subagents.list`    | Code Mode                       | Lists your subagents with run state, last activity, last outcome, cost, tokens, and directory      |
 | `subagents.inspect` | Code Mode                       | Shows one subagent's run times, running tools, latest text and error, pending prompts, and summary |
 | `context_status`    | Direct tool                     | Reports the caller's last measured context usage and model limits                                  |
@@ -200,9 +201,10 @@ subagents may already be stopped.
 
 ### `subagent_send`
 
-Pass a `sessionID` and a `message` of up to 8000 characters. Line breaks and code in the message
-are kept. A longer message is refused with its length, the limit and the overage. Nothing is
-sent.
+Pass a `sessionID` and at least one of `message`, `model` and `agent` (see
+[Switching the model or agent](#switching-the-model-or-agent)). A `message` holds up to 8000
+characters. Line breaks and code in the message are kept. A longer message is refused with its
+length, the limit and the overage. Nothing is sent.
 
 ```text
 message is 8,412 characters; the limit is 8,000 (412 over). Nothing was sent.
@@ -247,10 +249,14 @@ seen some.
 | `queued`      | It finished its run without reading the message; the message is delivered when the subagent is continued                                |
 | `unconfirmed` | It finished its run, and whether it read the message first can't be checked; if it didn't, the message is delivered when it's continued |
 
+A call that switches the model or agent without a message has no `status`.
+
 `subagent_send` refuses a subagent that is idle or stopped, and sends nothing. Continue those with
 `subagent` and their session ID instead. A message from the plugin can't start a run that reports
 back to the parent; only `subagent` can. An idle refusal says how long ago the subagent went
-idle, or that the time wasn't recorded.
+idle, or that the time wasn't recorded. When the call asked for a switch, the refusal also says
+how to continue a subagent you launched under another model, with `subagent`, its session ID, an
+`agent` and a `model`.
 
 A subagent that OpenCode reports idle although its last run recorded no end is refused the same
 way, because nothing would read the message until it is continued:
@@ -260,11 +266,95 @@ Subagent ses_e26b6053dffeQ1nV7xKpLm3RtA is not running, so nothing was sent: Ope
 ```
 
 OpenCode can also steer a running subagent when the parent calls `subagent` again with its session
-ID. `subagent_send` differs in three ways: it reaches subagents launched by your subagents, it never
-switches the subagent's agent or model, and it tells the parent when the message will be read.
+ID, an agent, a prompt and optionally a `model`. `subagent_send` differs in four ways. It reaches
+subagents launched by your subagents. It switches the agent or model only when the call names
+one, while `subagent` switches the agent whenever the name it gets differs from the subagent's. It
+can switch without a message. It tells the parent when the message will be read and when the
+switch takes effect.
 
 To change course right away, without waiting for the current tool call, stop the subagent with
 `subagent_stop` and continue it with `subagent`. Only the tool call in flight is lost.
+
+#### Switching the model or agent
+
+`model` switches the subagent to another model, written as `providerID/modelID` or
+`providerID/modelID#variant`. `agent` switches it to another agent. Without `model`, the subagent
+also moves to the new agent's configured model when that agent has one. It keeps its current model
+when the agent has none. Nothing switches unless the call names a `model` or an `agent`.
+
+```json
+{
+  "sessionID": "ses_8a0d2c71bffeTz4WqLx9mNc5Hd",
+  "model": "openai/gpt-5#high",
+  "message": "The parser rewrite needs more reasoning. Keep going at the higher effort."
+}
+```
+
+Before it changes anything, the plugin checks the request against the agents and models of the
+directory its copy runs in. A subagent in another directory can't be switched (see
+[Limits](#limits)). The first three checks are the ones OpenCode's `subagent` tool makes when it
+continues a child. The fourth goes further.
+
+- The model is an available chat model. An image or decision model is refused. So is a variant
+  the model doesn't have, with an error that lists the variants it has.
+- The agent exists and can run as a subagent. A primary-only agent such as `build` is refused, as
+  is an unknown name. Both errors list the agents that can run as subagents.
+- The caller may run the new agent as a subagent. The plugin checks OpenCode's `subagent`
+  permission with the agent as the resource, as `subagent` does. A rule that allows or denies it
+  decides at once. OpenCode asks a person only when the caller's rules say to ask.
+- A new agent's configured model passes the same model checks. OpenCode's `subagent` switches to
+  that model without checking it. A subagent left with a model that isn't available fails at its
+  next step. The plugin refuses the switch up front instead, which leaves the subagent running as
+  it was.
+
+When a check fails, nothing is switched or sent.
+
+```text
+Variant "ultra" is not available for "openai/gpt-5". Available: low, medium, high. Nothing was switched or sent.
+```
+
+Reading the catalog takes a moment, while a permission prompt can wait on a person for much
+longer. So once every check passes, the plugin reads the subagent's record again. If its agent or
+model changed in the meantime, the plugin plans the switch again from that record, so the result
+names what the subagent had right before the switch. It refuses the call if the subagent already
+ran the agent you asked for and someone switched it away meanwhile, since switching it back needs
+a permission check the call didn't make. It also refuses when the subagent is still being switched
+after two new plans. Last, just before the first change, it checks that the subagent isn't
+stopped and is still running. If any of these checks fails, it refuses the call, with nothing
+switched or sent.
+
+The plugin then switches the agent and then the model before it queues the message. If a switch
+fails, nothing is sent. The error says what was switched before the failure. If the message fails
+after the switch, the error says the switch stays in effect and the message wasn't sent.
+
+From OpenCode 2.2 through 2.4, a session reads its agent and model each time a step or a retry
+starts. A running subagent makes its next model request with the new agent and model. Tool calls
+in flight finish first, the same as before it reads a message. A model response in flight
+finishes on the old model. The step that reads the message normally uses the new ones too, with
+one exception described under [Limits](#limits).
+
+```text
+Switched ses_8a0d2c71bffeTz4WqLx9mNc5Hd (general, "Add CSV export") from model anthropic/claude-sonnet-4-5 to openai/gpt-5#high. Message sent. It reads your message after its current tool calls finish: shell (running 47m). It uses the new model from its next model request. Sending never interrupts; to redirect it right away, stop it with subagent_stop and continue it with subagent.
+```
+
+Without a message, the result says when that next model request starts.
+
+```text
+Switched ses_8a0d2c71bffeTz4WqLx9mNc5Hd (explore, "Add CSV export") from agent general to explore. It keeps model openai/gpt-5#high, since agent explore has no configured model. It uses the new agent from its next model request, which starts after its current tool calls finish: shell (running 47m). Switching never interrupts; to redirect it right away, stop it with subagent_stop and continue it with subagent. If you continue it later with subagent, pass agent explore: any other agent name switches its agent again.
+```
+
+After an agent switch on a subagent you launched yourself, the result also reminds you to pass the
+new agent's name when you continue it with `subagent`, since any other name switches its agent
+again.
+
+The structured result lists what changed in `switched`, as `agent` and `model`, each with `from`
+and `to`. Models are written with their variant. `from` is absent when the subagent had no value
+of its own recorded and ran OpenCode's default. A value that was already in effect is left out of
+`switched`. The note says so instead. The result's top-level `agent` is the agent the subagent
+runs after the call.
+
+To continue a subagent whose agent you switched, pass the new agent's name to `subagent`. OpenCode
+switches a child to whatever agent `subagent` names.
 
 ### Notices when a subagent is waiting
 
@@ -711,9 +801,12 @@ subagent the native tool already interrupted keeps it stopped from then on.
 ### How do I send a running subagent new instructions?
 
 Call `subagent_send` with its session ID and the message. The subagent reads it once its current
-tool calls finish. OpenCode 2.2 can also do this natively when the parent calls `subagent` again
-with the session ID, but only for direct children, and a mismatched agent name switches the
-subagent's agent and model.
+tool calls finish. Add `model` or `agent` to switch it as well, from its next model request.
+OpenCode 2.2 can also steer natively when the parent calls `subagent` again with the session ID,
+an agent, a prompt and optionally a `model`. That works only for direct children, always needs a
+prompt and switches the subagent's agent whenever the agent name differs from its current one,
+along with the model when that agent has one configured. `subagent_send` reaches subagents your
+subagents launched, switches nothing unless asked and can switch without a message.
 
 ### Why does a stopped subagent start running again?
 
@@ -773,6 +866,18 @@ were called tasks and plugins use a different API.
 - **A queued message switched to steer skips the stop reason.** If a person queues a message for a
   stopped subagent and then switches it to steer, the subagent continues normally but never sees why
   it was stopped.
+- **A subagent in another directory can't be switched.** OpenCode's plugin API lists only the
+  models of the directory a copy of the plugin runs in, whatever directory it is asked about. For
+  a subagent moved to another directory, checking against those models could refuse a model that
+  exists there or accept one that doesn't. So a call that asks to switch a subagent whose
+  directory differs from the plugin copy's is refused, with nothing switched or sent. The error
+  names both directories. A subdirectory or a worktree of the same project counts as another
+  directory. Switch the subagent from a session in its directory, or continue a subagent you
+  launched with `subagent`, an agent and a `model`. Messages without a switch still reach it.
+- **A message can still be read under the previous model.** OpenCode reads a subagent's agent
+  and model when a step starts and takes in queued messages a moment later. If a step starts just
+  before `subagent_send` switches the subagent, that step can take in the message under the
+  previous agent and model. The model request after it uses the new ones.
 - **Messages and notices wait for tool calls.** Neither `subagent_send` nor a notice to the parent
   interrupts a tool call in flight. A parent that is itself waiting on a subagent in the foreground
   gets no notice, because it couldn't read one until that subagent returns. If the plugin loaded
@@ -857,7 +962,8 @@ unread for 30 minutes, or the call reached another project's copy of the plugin.
 without `cursor`.
 
 **`subagent_send` says the subagent is idle.** It finished, or was never started. Continue it with
-`subagent`, its session ID, and your message.
+`subagent`, its session ID, and your message. To continue it under another model, add `model` to
+that call.
 
 **A subagent shows as running for hours with nothing happening.** Check it with
 `subagents.inspect`. If OpenCode failed to record the end of its run, the plugin finds that out
