@@ -16,6 +16,7 @@
 // startup exemptions live in memory. Session IDs contain no `/`, so the first `/` after a kind
 // prefix ends the session ID and the rest of the key is the generation.
 
+import { isSelfCompactionID } from "@/core/compaction";
 import type {
   Clock,
   Json,
@@ -91,7 +92,8 @@ type InboxItemType = Extract<
 /**
  * Inbox items that only a deliberate request admits. Synthetic items are left out: core's notices,
  * the messages `subagent_send` steers into a subagent, and the waiting notices posted to a parent
- * are all synthetic, and none of them asks to continue a stopped session.
+ * are all synthetic, and none of them asks to continue a stopped session. Self-compaction
+ * admissions are excluded separately by their ID.
  */
 const LIFTING_ITEMS: ReadonlySet<InboxItemType> = new Set<InboxItemType>([
   "user",
@@ -286,6 +288,10 @@ export class Latch {
       case "session.deleted":
         return this.forget(event.data.sessionID);
       case "session.inbox.enqueued":
+        if (
+          event.data.item.type === "compaction" &&
+          isSelfCompactionID(event.data.inboxID)
+        ) return;
         if (!LIFTING_ITEMS.has(event.data.item.type)) return;
         return this.liftOnEvent(event.data.sessionID, event.created);
       case "session.inbox.delivery.changed":

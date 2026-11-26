@@ -3,7 +3,8 @@
 // scripts can call plugin-side APIs, and simulates the stop latch on `session.execution.started`.
 import { Plugin } from "@opencode/plugin";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import type { ToolContext } from "@opencode/plugin/promise/tool";
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Ctx = Plugin.Context;
@@ -78,6 +79,7 @@ export default Plugin.define({
     log("setup", { pid: process.pid, version: ctx.app.version });
 
     const controller = new AbortController();
+    let failCompaction = false;
 
     // Latch simulation: a stored `probe-latch/<id>` key is read on every decision.
     const latched = async (sessionID: string) =>
@@ -223,6 +225,39 @@ export default Plugin.define({
       });
     });
 
+    if (ctx.options.contextProbes === true) {
+      await ctx.tool.hook("execute.after", (event) => {
+        log("context-hook-enter", {
+          sessionID: event.sessionID,
+          messageID: event.messageID,
+          callID: event.id,
+          tool: event.tool,
+          status: event.status,
+          result: event.status === "completed" ? event.result : undefined,
+        });
+      });
+      await ctx.session.hook("compaction", (event) => {
+        log("compaction-hook", { sessionID: event.sessionID });
+        event.system.push({
+          type: "text",
+          text: `PROBE-COMPACTION<${event.sessionID}>`,
+        });
+      });
+      await ctx.session.hook("http.response", (event) => {
+        if (failCompaction && event.kind === "compaction") {
+          event.response = Response.json(
+            {
+              error: {
+                message: "PROBE-COMPACTION-FAILURE",
+                type: "invalid_request_error",
+              },
+            },
+            { status: 400 },
+          );
+        }
+      });
+    }
+
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "probens",
@@ -283,6 +318,58 @@ export default Plugin.define({
         );
       },
       context: async (args) => ctx.session.context({ sessionID: sid(args) }),
+      models: async (args) =>
+        ctx.model.list({
+          location: {
+            directory: (text(args, "directory") ?? location) as Directory,
+          },
+        }),
+      "model.limit": async (args) => {
+        const limit = Number(field(args, "context"));
+        await ctx.model.transform((editor) => {
+          editor.update(
+            "simulation",
+            text(args, "modelID") ?? "gpt-sim-model",
+            (model) => {
+              model.limit.context = limit;
+              model.limit.input = Number(field(args, "input") ?? limit);
+            },
+          );
+        });
+        return { ok: true };
+      },
+      switchModel: async (args) =>
+        ctx.session.switchModel({
+          sessionID: sid(args),
+          model: {
+            providerID: "simulation",
+            id: text(args, "modelID") ?? "gpt-sim-model",
+          },
+        }),
+      compact: async (args) =>
+        ctx.session.compact({
+          sessionID: sid(args),
+          ...(text(args, "id") === undefined ? {} : { id: text(args, "id") }),
+          delivery: text(args, "delivery") === "queue" ? "queue" : "steer",
+        }),
+      "compaction.fail": async (args) => {
+        failCompaction = field(args, "enabled") === true;
+        return { ok: true };
+      },
+      "tool.run": async (args) => {
+        const tool = (await ctx.tool.list()).find(
+          (item) => item.id === text(args, "tool"),
+        );
+        if (!tool) throw new Error(`tool not found: ${text(args, "tool")}`);
+        return tool.execute(field(args, "input") ?? {}, {
+          sessionID: sid(args) as ToolContext["sessionID"],
+          messageID: text(args, "messageID") as ToolContext["messageID"],
+          agent: (text(args, "agent") ?? "build") as ToolContext["agent"],
+          id: `probe_${crypto.randomUUID()}` as ToolContext["id"],
+          signal: new AbortController().signal,
+          progress: async () => {},
+        });
+      },
       create: async (args) =>
         ctx.session.create((isRecord(args) ? args : {}) as CreateInput),
       prompt: async (args) =>
@@ -300,6 +387,13 @@ export default Plugin.define({
         ctx.session.synthetic({
           sessionID: sid(args),
           text: text(args, "text") ?? "",
+          ...(text(args, "id") === undefined ? {} : { id: text(args, "id") }),
+          ...(text(args, "delivery") === undefined
+            ? {}
+            : { delivery: text(args, "delivery") as Delivery }),
+          ...(isRecord(field(args, "metadata"))
+            ? { metadata: field(args, "metadata") as Record<string, Json> }
+            : {}),
           ...(typeof field(args, "resume") === "boolean"
             ? { resume: field(args, "resume") === true }
             : {}),
@@ -358,6 +452,16 @@ export default Plugin.define({
       },
       permissions: async (args) =>
         ctx.permission.list({ sessionID: sid(args) }),
+      "instructions.list": async (args) =>
+        ctx.session.instructions.entry.list({ sessionID: sid(args) }),
+      "instructions.put": async (args) => {
+        await ctx.session.instructions.entry.put({
+          sessionID: sid(args),
+          key: text(args, "key") ?? "",
+          value: (field(args, "value") ?? null) as Json,
+        });
+        return { ok: true };
+      },
     };
 
     const server = Bun.serve({
@@ -378,13 +482,17 @@ export default Plugin.define({
       },
     });
     writeFileSync(
-      join(dir, "instances", `${instance}.json`),
+      join(dir, "instances", `${instance}.tmp`),
       JSON.stringify({
         instance,
         location,
         pid: process.pid,
         port: server.port,
       }),
+    );
+    renameSync(
+      join(dir, "instances", `${instance}.tmp`),
+      join(dir, "instances", `${instance}.json`),
     );
     log("ready", { port: server.port });
 

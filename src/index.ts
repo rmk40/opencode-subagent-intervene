@@ -1,8 +1,8 @@
-// Entry point of the `subagent-intervene` server plugin: subagent_stop, subagent_send,
-// subagents.list, and subagents.inspect, plus the stop latch that keeps stopped subagents stopped
-// and the notices that tell a parent its subagent is waiting on a person.
+// Subagent controls, self-context tools, durable notices and the parent-stop latch.
 
 import { Plugin } from "@opencode/plugin";
+import { ContextNotices } from "@/core/context-notice";
+import { DEFAULT_CONTEXT_WARNING_PERCENT } from "@/core/context-usage";
 import { DEFAULT_LATCH_TTL_MS, Latch } from "@/core/latch";
 import { DEFAULT_NOTICE_DELAY_MS, PromptNotices } from "@/core/notices";
 import { type Logger, type OpenCodeEvent, PLUGIN_ID } from "@/core/ports";
@@ -11,6 +11,9 @@ import { renderStopNote } from "@/core/sanitize";
 import { DEFAULT_SETTLE_MS } from "@/core/stop";
 import { consume } from "@/events";
 import { consoleLogger, createHost } from "@/host";
+import { contextCompactTool } from "@/tools/context-compact";
+import { contextNotesTool } from "@/tools/context-notes";
+import { contextStatusTool } from "@/tools/context-status";
 import { inspectTool } from "@/tools/inspect";
 import { listTool } from "@/tools/list";
 import { sendTool } from "@/tools/send";
@@ -61,6 +64,12 @@ export interface Settings {
   readonly promptNotices: boolean;
   /** How long a prompt stays open before the parent is told; 0 tells it right away. */
   readonly promptNoticeSeconds: number;
+  /** Admit durable context notices after successful local tools. */
+  readonly contextNotices: boolean;
+  /** Make the self-scoped compaction tool available. */
+  readonly selfCompaction: boolean;
+  /** Starting percentage of the current usable input window for context notices. */
+  readonly contextWarningPercent: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -71,6 +80,9 @@ export const DEFAULT_SETTINGS: Settings = {
   settleMs: DEFAULT_SETTLE_MS,
   promptNotices: true,
   promptNoticeSeconds: DEFAULT_NOTICE_DELAY_MS / SECOND_MS,
+  contextNotices: true,
+  selfCompaction: true,
+  contextWarningPercent: DEFAULT_CONTEXT_WARNING_PERCENT,
 };
 
 /** Reads plugin options over the defaults. Invalid values and unknown keys are ignored with a warning. */
@@ -86,6 +98,9 @@ export function parseOptions(
     settleMs,
     promptNotices,
     promptNoticeSeconds,
+    contextNotices,
+    selfCompaction,
+    contextWarningPercent,
   } = DEFAULT_SETTINGS;
   const ignore = (option: string, value: unknown, expected: string) =>
     logger.warn(`ignoring option ${option}: expected ${expected}`, {
@@ -132,6 +147,21 @@ export function parseOptions(
           );
         }
         break;
+      case "contextNotices":
+        if (typeof value === "boolean") contextNotices = value;
+        else ignore(option, value, "a boolean");
+        break;
+      case "selfCompaction":
+        if (typeof value === "boolean") selfCompaction = value;
+        else ignore(option, value, "a boolean");
+        break;
+      case "contextWarningPercent":
+        if (isFiniteNumber(value) && value > 0 && value < 100) {
+          contextWarningPercent = value;
+        } else {
+          ignore(option, value, "a finite number greater than 0 and less than 100");
+        }
+        break;
       default:
         logger.warn(`ignoring unknown option ${option}`);
     }
@@ -144,6 +174,9 @@ export function parseOptions(
     settleMs,
     promptNotices,
     promptNoticeSeconds,
+    contextNotices,
+    selfCompaction,
+    contextWarningPercent,
   };
 }
 
@@ -183,6 +216,20 @@ export default Plugin.define({
             logger,
           },
           { delayMs: settings.promptNoticeSeconds * SECOND_MS },
+        )
+      : undefined;
+    const contextNotices = settings.contextNotices
+      ? new ContextNotices(
+          {
+            reader: host.reader,
+            models: host.models,
+            messenger: host.messenger,
+            ...(settings.latch ? { latch } : {}),
+            logger,
+          },
+          {
+            warningPercent: settings.contextWarningPercent,
+          },
         )
       : undefined;
 
@@ -243,6 +290,29 @@ export default Plugin.define({
       }
       registrations.push(
         await ctx.tool.transform((editor) => {
+          editor.add(
+            contextStatusTool(
+              { reader: host.reader, models: host.models, logger },
+              {
+                warningPercent: settings.contextWarningPercent,
+                warningsEnabled: settings.contextNotices,
+              },
+            ),
+          );
+          editor.add(
+            contextNotesTool({
+              instructions: host.instructions,
+              clock: host.clock,
+            }),
+          );
+          if (settings.selfCompaction) {
+            editor.add(
+              contextCompactTool({
+                compactor: host.compactor,
+                messenger: host.messenger,
+              }),
+            );
+          }
           editor.namespace({
             name: NAMESPACE,
             description: NAMESPACE_DESCRIPTION,
@@ -297,9 +367,17 @@ export default Plugin.define({
           );
         }),
       );
+      if (contextNotices !== undefined) {
+        registrations.push(
+          await ctx.tool.hook("execute.after", (event) =>
+            contextNotices.afterTool(event),
+          ),
+        );
+      }
     } catch (error) {
       subscription.abort();
       notices?.dispose();
+      contextNotices?.dispose();
       await disposeAll(registrations, logger);
       throw error;
     }
@@ -307,6 +385,7 @@ export default Plugin.define({
     return async () => {
       subscription.abort();
       notices?.dispose();
+      contextNotices?.dispose();
       await disposeAll(registrations, logger);
       await consuming;
     };

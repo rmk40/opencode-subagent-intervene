@@ -6,9 +6,8 @@
 [![OpenCode 2.2+](https://img.shields.io/badge/OpenCode-2.2%2B-black)](https://opencode.ai/v2/docs/)
 [![discord](https://img.shields.io/badge/discord-discussion-5865F2?logo=discord&logoColor=white)](https://discord.com/channels/1391832426048651334/1565393733204316290)
 
-An [OpenCode](https://opencode.ai) plugin that lets an agent stop the subagents it launched, including
-background ones, send them new instructions while they work, see which ones are still running, and
-check what each one is doing.
+An [OpenCode](https://opencode.ai) plugin that lets an agent stop and steer its subagents,
+check their progress and manage its own context usage and compaction.
 
 OpenCode 2 lets an agent hand work to subagents, including background ones that keep going while
 the parent does something else. It gives the parent no way to stop one. A person can press `ctrl+d`
@@ -91,14 +90,22 @@ opens loads its own copy of the plugin, and a stop is only kept while at least o
 | `subagent_send`     | Direct tool, next to `subagent` | Sends a running subagent a message without stopping it                                             |
 | `subagents.list`    | Code Mode                       | Lists your subagents with run state, last outcome, cost, tokens, and directory                     |
 | `subagents.inspect` | Code Mode                       | Shows one subagent's running tools, latest text and error, pending permission prompts, and summary |
+| `context_status`    | Direct tool                     | Reports the caller's last measured context usage and model limits                                  |
+| `context_notes`     | Direct tool                     | Saves, reads or clears working notes kept through automatic and manual compaction                  |
+| `context_compact`   | Direct tool                     | Requests compaction of the caller's session with optional handoff notes                            |
 
-If Code Mode is off, OpenCode offers the last two as direct tools named `subagents_list` and
-`subagents_inspect`.
+If Code Mode is off, OpenCode offers `subagents.list` and `subagents.inspect` as direct tools
+named `subagents_list` and `subagents_inspect`.
 
-Every call checks, from fresh session data, that the target is a subagent the caller launched or
+The four subagent tools check, from fresh session data, that the target is a subagent the caller launched or
 one launched below it. Anything else fails with `Session … is not one of your subagents.` The
-tools are hidden from agents that aren't allowed to launch subagents, such as OpenCode's built-in
+subagent tools are hidden from agents that aren't allowed to launch subagents, such as OpenCode's built-in
 `general` and `explore` agents.
+
+The context tools operate only on the caller's session and have their own `context_status`,
+`context_notes` and `context_compact` permission keys. They do not require permission to launch
+subagents. Agents with a deny-all tool whitelist, including built-in `explore`, need explicit
+allow rules for these three keys.
 
 ### `subagent_stop`
 
@@ -258,6 +265,132 @@ Added the CSV writer and the export command. Remaining: quoting, then the docs.
 The summary gets whatever room the other fields leave. If none is left, the Scope line says so and
 suggests a larger `maxChars`.
 
+### `context_status`
+
+Call with `{}` for a short status line with measured tokens, remaining input capacity, notice
+starting percentage, default automatic-compaction estimate, measurement time and latest
+compaction status.
+Usage includes input, output, reasoning and cache tokens from the latest eligible completed
+response. It is not cumulative session billing.
+
+The primary percentage uses the usable input window, which drives the plugin's notices. This
+is the smaller positive input and context limit, or whichever one is known. The status adds a
+separate UI percentage only when the context limit is known and differs from that window.
+For example, 214,560 tokens is 78.88% of a 272,000-token input window and 53.64% of a
+400,000-token context limit. Equal denominators need only one figure.
+
+For a 750k measurement in a 1M input window, the line includes `250k remaining` and
+`default auto ~850k (100k away)`. These are separate budgets. The first is capacity left in
+the input window, while the second is distance to the default automatic-compaction estimate.
+Overruns appear as `50k over input window` or `150k past estimate`.
+
+The structured result retains both `reportedWindowPercent` and `reportedContextPercent` when
+known, along with exact token counts, the raw token breakdown, model limits and measurement IDs.
+`inputHeadroomTokens` and `defaultAutoCompactionHeadroomTokens` are signed differences from
+those two limits. They appear only with a current-model measurement and a known input window.
+
+Later messages and pending tool or subagent results are not included in the measurement.
+Usage is unknown before the first measurement and after compaction until
+another response completes. A previous model's measurement is identified separately rather than
+used to calculate the current model's percentages.
+
+[OpenCode's default compaction buffer](https://opencode.ai/v2/docs/compaction#buffer) reserves 15%
+of the usable window, with a 16k minimum for windows of at least 32k tokens. The status shows the
+resulting threshold as a default token estimate, normally 85% of the window. The structured
+`defaultAutoCompactionThreshold` contains its token count and percentage. A configured
+`compaction.buffer` can change that threshold and `compaction.auto` can disable automatic
+compaction. The public plugin API does not expose those resolved settings, so
+`autoCompactionThreshold` remains `"unknown"` for the effective trigger. Disabled plugin notices
+are identified in the status line.
+
+### `context_notes`
+
+Save working notes whenever the agent needs to preserve exact decisions, session IDs or the
+next action without requesting compaction.
+
+```json
+{
+  "action": "save",
+  "notes": "CSV parsing is implemented in src/import.ts. Test agent ses_8a0d2c71bffeTz4WqLx9mNc5Hd owns test/import.test.ts. Next, read its result and handle malformed rows."
+}
+```
+
+`save` replaces the latest notes with 1 to 8,000 Unicode code points. Whitespace and line
+breaks are preserved exactly. `read` returns the saved text with its revision and save time,
+or reports that no notes are saved. `clear` removes the active notes and is safe to repeat.
+Pass `notes` only with `save`.
+
+The host keeps the latest notes through automatic and manual compaction, independently of the
+generated summary. They use one native session instruction entry, stored as structured JSON
+labelled agent-authored reference data. OpenCode places instruction entries in system context.
+The notes describe the agent's work and do not supply new user or system instructions.
+
+Saving appends a context update at the next step boundary without requesting compaction or
+starting an idle session. Updates preserve the existing context baseline until compaction,
+and the host carries the latest notes or their removal into the next model request after
+compaction. A change made just before manual compaction can arrive as an update to the previous
+baseline on that first request. Clearing removes the active entry and announces its removal.
+Earlier copies can remain in the baseline, history or summaries.
+The entry persists across plugin reloads. If its stored format is unreadable, `read` and `save`
+report an error, and `clear` removes it.
+
+This tool remains available when `selfCompaction` or `contextNotices` is off. It is separate
+from the optional handoff supplied to `context_compact`.
+
+### `context_compact`
+
+Call with `{}` or optional handoff notes of up to 8,000 characters.
+
+```json
+{
+  "handoff": "CSV parsing is implemented in src/import.ts. The quoting tests pass. Next, add the malformed-row error and run the import suite."
+}
+```
+
+The tool returns once OpenCode accepts the request. Compaction normally runs after all tools in
+the current step finish and the agent then continues. The result reports the actual delivery
+mode. If OpenCode already has a queued compaction, it reuses that request without promoting it
+to immediate delivery.
+
+Handoff notes are stored as an ordinary synthetic message. With steered compaction, they are
+delivered after the new checkpoint. With an existing queued compaction, they can arrive before
+it and later be summarized. If note admission fails, the result says that compaction is already
+requested but the notes were not stored. Request admission does not guarantee that summary
+generation will succeed.
+
+A child requesting compaction cannot undo a parent's stop. The tool accepts no target session
+ID and does not replace OpenCode's automatic compaction.
+
+### Context notices
+
+After successful tool calls, the plugin reports usage at 50%, 60%, 70%, 80%, 85%, 90%, 95%
+and 100% of the usable input window. Each notice gives the measured usage, model, measurement
+time, remaining input capacity and distance to the default automatic-compaction estimate.
+These measurements let the agent plan how much work fits before the limit. The agent decides
+when compaction is worth its cost.
+
+The planning guidance sets a goal of using roughly 90% of the input window for useful work.
+It asks the agent to judge whether the next step and its expected output fit in the remaining
+window and narrow large results when possible. Receiving a notice or reaching 90% alone is not
+a reason to compact. The 90% goal does not change OpenCode's automatic threshold.
+
+The `contextWarningPercent` option sets the first notice, with a default of 50%. Notices repeat
+every ten percentage points below 80%, then at the fixed 80%, 85%, 90%, 95% and 100% milestones
+that are above the starting percentage. A start of 65% gives 65%, 75%, 80%, 85%, 90%, 95% and
+100%. A start of 83% gives 83%, 85%, 90%, 95% and 100%. A jump across several milestones emits
+only the highest reached one. Notices add the UI percentage only when its denominator differs.
+The default automatic-compaction estimate appears when the window is known.
+
+Notices are appended to session history without rewriting earlier messages or system
+instructions. Their text stays fixed on later requests. Compaction replaces history and can
+require rebuilding cached context. Plugin upgrades that change tool definitions can also
+invalidate cached context. Tool-free final answers do not trigger notices or an extra response.
+
+Each notice identifies its measurement, model and compaction checkpoint. It ends with
+"Later messages and pending tool or subagent results are not included in this measurement."
+A notice already queued when compaction runs can arrive afterward. The milestones control
+notification frequency only. OpenCode's automatic-compaction threshold is separate.
+
 ## Configuration
 
 Options go in the object form of the plugin entry:
@@ -274,15 +407,20 @@ Options go in the object form of the plugin entry:
 }
 ```
 
-| Option                | Default | Description                                                                                        |
-| --------------------- | ------- | -------------------------------------------------------------------------------------------------- |
-| `confirmStop`         | `false` | Check the `subagent_stop` permission before stopping, once per kind of subagent                    |
-| `latch`               | `true`  | Keep stopped subagents stopped until someone continues them. With `false`, a stop is one interrupt |
-| `latchTtlHours`       | `24`    | How long a stop is kept if nobody continues the subagent                                           |
-| `notifyChild`         | `true`  | Start the prompt that continues a stopped subagent with the stop reason                            |
-| `settleMs`            | `4000`  | How long each settle round waits for stopped subagents to go idle                                  |
-| `promptNotices`       | `true`  | Tell the parent when a subagent is waiting on a permission prompt or a question                    |
-| `promptNoticeSeconds` | `60`    | How long a prompt stays open before the parent is told, from `0` to `3600`                         |
+| Option                  | Default | Description                                                                                        |
+| ----------------------- | ------- | -------------------------------------------------------------------------------------------------- |
+| `confirmStop`           | `false` | Check the `subagent_stop` permission before stopping, once per kind of subagent                    |
+| `latch`                 | `true`  | Keep stopped subagents stopped until someone continues them. With `false`, a stop is one interrupt |
+| `latchTtlHours`         | `24`    | How long a stop is kept if nobody continues the subagent                                           |
+| `notifyChild`           | `true`  | Start the prompt that continues a stopped subagent with the stop reason                            |
+| `settleMs`              | `4000`  | How long each settle round waits for stopped subagents to go idle                                  |
+| `promptNotices`         | `true`  | Tell the parent when a subagent is waiting on a permission prompt or a question                    |
+| `promptNoticeSeconds`   | `60`    | How long a prompt stays open before the parent is told, from `0` to `3600`                         |
+| `contextNotices`        | `true`  | Report context usage after successful tools at each reached milestone                              |
+| `selfCompaction`        | `true`  | Offer `context_compact` while keeping the status and notes tools available                         |
+| `contextWarningPercent` | `50`    | Set the starting percentage for context notices                                                    |
+
+The starting percentage must be above 0% and below 100%.
 
 Invalid values and unknown options are ignored with a warning, and the default is used.
 
@@ -299,8 +437,20 @@ on its own and refuse everything else:
 }
 ```
 
-To keep an agent from seeing the tools at all, deny it `subagent`. The tools follow the same rule as
-launching subagents.
+To hide the four subagent tools, deny the agent `subagent`. The context tools use their own
+permission keys and do not grant access to other sessions.
+
+For an agent with a deny-all whitelist, allow just the context tools in its permission rules.
+
+```jsonc
+{
+  "permissions": [
+    { "action": "context_status", "resource": "*", "effect": "allow" },
+    { "action": "context_notes", "resource": "*", "effect": "allow" },
+    { "action": "context_compact", "resource": "*", "effect": "allow" },
+  ],
+}
+```
 
 ## Questions
 
@@ -386,9 +536,12 @@ were called tasks and plugins use a different API.
 
 ## Troubleshooting
 
-**The tools don't show up.** The agent isn't allowed to launch subagents, so the tools are hidden
+**The subagent tools don't show up.** The agent isn't allowed to launch subagents, so those tools are hidden
 too. Check its `subagent` permission. A blanket allow rule in your config re-enables it for agents
 like `general` that deny it by default.
+
+If a context tool is missing, check its own permission key and the `selfCompaction` option for
+`context_compact`.
 
 **`subagents.list` returns `complete: false`.** The caller has more than 2000 subagents and their
 subagents. The list covers 2000 sessions under the most recently updated subagents, which includes
@@ -410,6 +563,7 @@ bun install
 bun run build
 bun run typecheck
 bun run test
+bun run test:protocol
 ```
 
 The end-to-end scenarios in `test/e2e/` drive a sandboxed OpenCode through

@@ -7,11 +7,14 @@ import {
   type Clock,
   type Json,
   type Logger,
+  type ModelReader,
   type PermissionReader,
   PLUGIN_ID,
   type Scheduler,
   type SessionControl,
+  type SessionCompactor,
   type SessionID,
+  type SessionInstructionEntries,
   type SessionMessenger,
   type SessionReader,
   type Store,
@@ -27,9 +30,12 @@ export const STOP_PERMISSION = "subagent_stop";
 
 export interface Host {
   readonly reader: SessionReader;
+  readonly models: ModelReader;
+  readonly compactor: SessionCompactor;
   readonly control: SessionControl;
   readonly permissions: PermissionReader;
   readonly messenger: SessionMessenger;
+  readonly instructions: SessionInstructionEntries;
   readonly store: Store;
   readonly clock: Clock;
   readonly scheduler: Scheduler;
@@ -44,6 +50,17 @@ export interface Host {
 export function createHost(ctx: Plugin.Context, logger: Logger): Host {
   return {
     reader: sessionReader(ctx),
+    models: {
+      async list(directory) {
+        return (await ctx.model.list({ location: { directory } })).data;
+      },
+    },
+    compactor: {
+      async compact(input) {
+        const item = await ctx.session.compact(input);
+        return { id: item.id, delivery: item.delivery };
+      },
+    },
     control: sessionControl(ctx),
     permissions: {
       async pendingRequestIDs(sessionID) {
@@ -52,6 +69,11 @@ export function createHost(ctx: Plugin.Context, logger: Logger): Host {
       },
     },
     messenger: sessionMessenger(ctx),
+    instructions: {
+      list: (sessionID) => ctx.session.instructions.entry.list({ sessionID }),
+      put: (input) => ctx.session.instructions.entry.put(input),
+      remove: (input) => ctx.session.instructions.entry.remove(input),
+    },
     store: pluginStore(ctx),
     clock: systemClock,
     scheduler: unrefScheduler,

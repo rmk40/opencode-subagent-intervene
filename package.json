@@ -1,7 +1,7 @@
 {
   "name": "opencode-subagent-intervene",
   "version": "1.0.1",
-  "description": "OpenCode plugin to stop, steer, and monitor subagents: cancel background subagents, send running ones new instructions, list what's running, and get told when one is stuck on a permission prompt",
+  "description": "OpenCode plugin to stop, steer and monitor subagents, report context usage and let agents request their own compaction",
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -42,8 +42,9 @@
     "typecheck": "tsc --noEmit",
     "typecheck:e2e": "tsc --noEmit -p test/e2e/tsconfig.json",
     "test": "bun test test/unit",
+    "test:protocol": "bun test test/e2e/protocol.test.ts",
     "probe": "bun test/e2e/run.ts",
-    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+    "prepublishOnly": "bun run typecheck && bun run test && bun run test:protocol && bun run build"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.2.0",
@@ -58,6 +59,7 @@
     }
   },
   "devDependencies": {
+    "@opencode/ai": "2.2.0",
     "@opencode/client": "2.2.0",
     "@opencode/plugin": "2.2.0",
     "@types/bun": "1.4.4",

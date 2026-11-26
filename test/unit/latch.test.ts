@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { requestSelfCompaction, selfCompactionID } from "@/core/compaction";
 import {
   DEFAULT_LATCH_TTL_MS,
   DEFAULT_VALVE_MAX,
@@ -7,7 +8,7 @@ import {
   type LatchInput,
   type LatchOptions,
 } from "@/core/latch";
-import type { OpenCodeEvent } from "@/core/ports";
+import type { CompactionAdmission, OpenCodeEvent } from "@/core/ports";
 import {
   deferred,
   deliveryChanged,
@@ -18,6 +19,7 @@ import {
   inboxEnqueued,
   MemoryStore,
   RecordingLogger,
+  RecordingMessenger,
   revertCleared,
   sessionCreated,
   sessionDeleted,
@@ -339,6 +341,71 @@ describe("lifting", () => {
     await latch.onEvent(inboxEnqueued("s", "user", AT + 50));
     expect(await latch.isActive("s", "g2")).toBe(true);
     expect(store.keys().filter((key) => key.startsWith("lift/"))).toEqual([]);
+  });
+});
+
+describe("self-compaction under a parent stop", () => {
+  test.each(["steer", "queue"] as const)(
+    "recognizes a self-compaction %s admission in a different latch instance before the API returns",
+    async (delivery) => {
+      const { latch, store, control, clock, logger } = setup();
+      await latch.add("s", stop());
+      const observer = new Latch({ store, control, clock, logger, renderNote: () => "" });
+      const admission = deferred<CompactionAdmission>();
+      const eventHandled = deferred<void>();
+      const pending = requestSelfCompaction({
+        compactor: { compact: async (input) => {
+          const event = inboxEnqueued("s", "compaction", NOW, delivery);
+          await observer.onEvent({ ...event, data: { ...event.data, inboxID: input.id } });
+          eventHandled.resolve();
+          return admission.promise;
+        } },
+        messenger: new RecordingMessenger(),
+      }, { sessionID: "s", signal: new AbortController().signal });
+      await eventHandled.promise;
+      expect(await latch.isActive("s", "g1")).toBe(true);
+      expect(store.data.has("lift/s/g1")).toBe(false);
+      await observer.onEvent(executionStarted("s"));
+      expect(control.interrupts).toEqual(["s"]);
+      admission.resolve({ id: "msg_returned", delivery });
+      await pending;
+      expect(await latch.isActive("s", "g1")).toBe(true);
+    },
+  );
+
+  test("a deliberate delivery change still lifts a self-compaction admission", async () => {
+    const { latch } = setup();
+    await latch.add("s", stop());
+    const id = selfCompactionID();
+    const admission = inboxEnqueued("s", "compaction", NOW, "queue");
+    await latch.onEvent({ ...admission, data: { ...admission.data, inboxID: id } });
+    expect(await latch.isActive("s")).toBe(true);
+    const change = deliveryChanged("s", "steer", NOW + 1);
+    await latch.onEvent({ ...change, data: { ...change.data, inboxID: id } });
+    expect(await latch.isActive("s")).toBe(false);
+  });
+
+  test("an external compaction with a similar ID still lifts the latch", async () => {
+    const { latch } = setup();
+    await latch.add("s", stop());
+    const admission = inboxEnqueued("s", "compaction", NOW);
+    await latch.onEvent({ ...admission, data: { ...admission.data, inboxID: "msg_external_subagent-intervene_self_compaction_id" } });
+    expect(await latch.isActive("s")).toBe(false);
+  });
+
+  test("coalescing onto an external request emits no new lift and does not reclassify its later event", async () => {
+    const { latch } = setup();
+    await latch.add("s", stop());
+    const external = "msg_external_pending";
+    const result = await requestSelfCompaction({
+      compactor: { compact: async () => ({ id: external, delivery: "queue" }) },
+      messenger: new RecordingMessenger(),
+    }, { sessionID: "s", signal: new AbortController().signal });
+    expect(result.id).toBe(external);
+    expect(await latch.isActive("s")).toBe(true);
+    const event = inboxEnqueued("s", "compaction", NOW);
+    await latch.onEvent({ ...event, data: { ...event.data, inboxID: external } });
+    expect(await latch.isActive("s")).toBe(false);
   });
 });
 

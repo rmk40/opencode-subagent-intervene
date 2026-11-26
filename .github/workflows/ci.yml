@@ -23,6 +23,7 @@ jobs:
       - run: bun run typecheck
       - run: bun run typecheck:e2e
       - run: bun run test
+      - run: bun run test:protocol
       - run: bun run build
       - name: Package contents
         run: npm pack --dry-run

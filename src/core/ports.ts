@@ -2,6 +2,8 @@
 // `src/host.ts` implements them over `ctx`; unit tests implement them with fakes.
 
 import type {
+  JsonValue,
+  ModelInfo,
   OpenCodeEvent,
   SessionInfo,
   SessionMessageInfo,
@@ -34,10 +36,31 @@ export interface SessionReader {
     cursor?: string,
     order?: "asc" | "desc",
   ): Promise<{ data: readonly SessionInfo[]; next?: string }>;
-  /** Messages after the latest compaction. */
+  /** Active stored history, including the latest completed compaction. */
   context(sessionID: SessionID): Promise<readonly SessionMessageInfo[]>;
   /** Actions of permission requests waiting for an answer in this session. */
   pendingPermissions(sessionID: SessionID): Promise<readonly string[]>;
+}
+
+export type ContextModel = Pick<ModelInfo, "id" | "providerID" | "limit">;
+
+/** Reads the catalog in the session's location, which can differ from the plugin's. */
+export interface ModelReader {
+  list(directory: string): Promise<readonly ContextModel[]>;
+}
+
+export interface CompactionAdmission {
+  readonly id: string;
+  readonly delivery: "steer" | "queue";
+}
+
+export interface SessionCompactor {
+  /** Returns admission only. A coalesced request retains its existing ID and delivery. */
+  compact(input: {
+    readonly sessionID: SessionID;
+    readonly id: string;
+    readonly delivery: "steer";
+  }): Promise<CompactionAdmission>;
 }
 
 export interface SessionControl {
@@ -93,6 +116,34 @@ export interface SessionMessenger {
   synthetic(
     message: SyntheticMessage,
   ): Promise<{ readonly id: string; readonly createdAt: number }>;
+}
+
+/**
+ * Keyed entries in a session's instructions. The host renders each active entry as a
+ * `<context key="...">` block in the system context and announces puts and removals as chronological
+ * updates at the next step boundary. The host keeps entries across compaction; a change can appear
+ * as a chronological update on a previously observed baseline. Entries outlive the plugin instance
+ * that wrote them.
+ */
+export interface SessionInstructionEntries {
+  /** Active entries only; removed keys are absent. */
+  list(
+    sessionID: SessionID,
+  ): Promise<ReadonlyArray<{ readonly key: string; readonly value: Json }>>;
+  /**
+   * Creates or replaces the entry; the last successful put wins. Keys match
+   * `/^[a-z0-9][a-z0-9._-]*$/` and the JSON-encoded value is at most 256 KiB.
+   */
+  put(input: {
+    readonly sessionID: SessionID;
+    readonly key: string;
+    readonly value: JsonValue;
+  }): Promise<void>;
+  /** Removes the entry. Removing a key that is absent or already removed changes nothing. */
+  remove(input: {
+    readonly sessionID: SessionID;
+    readonly key: string;
+  }): Promise<void>;
 }
 
 /** Timers for work that must not keep the server process alive. */

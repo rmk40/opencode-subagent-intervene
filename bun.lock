@@ -5,6 +5,7 @@
     "": {
       "name": "opencode-subagent-intervene",
       "devDependencies": {
+        "@opencode/ai": "2.2.0",
         "@opencode/client": "2.2.0",
         "@opencode/plugin": "2.2.0",
         "@types/bun": "1.4.4",

@@ -25,6 +25,9 @@ describe("parseOptions", () => {
       settleMs: 4000,
       promptNotices: true,
       promptNoticeSeconds: 60,
+      contextNotices: true,
+      selfCompaction: true,
+      contextWarningPercent: 50,
     });
     expect(settings).toEqual(DEFAULT_SETTINGS);
     expect(warnings).toEqual([]);
@@ -41,6 +44,15 @@ describe("parseOptions", () => {
     ["promptNoticeSeconds", 0],
     ["promptNoticeSeconds", 1.5],
     ["promptNoticeSeconds", MAX_PROMPT_NOTICE_SECONDS],
+    ["contextNotices", false],
+    ["contextNotices", true],
+    ["selfCompaction", false],
+    ["selfCompaction", true],
+    ["contextWarningPercent", 0.01],
+    ["contextWarningPercent", 50],
+    ["contextWarningPercent", 70],
+    ["contextWarningPercent", 75.5],
+    ["contextWarningPercent", 99.99],
   ];
 
   test.each(VALID)(
@@ -72,6 +84,17 @@ describe("parseOptions", () => {
     ["promptNoticeSeconds", "60"],
     ["promptNoticeSeconds", Number.POSITIVE_INFINITY],
     ["promptNoticeSeconds", Number.NaN],
+    ["contextNotices", "false"],
+    ["contextNotices", 0],
+    ["selfCompaction", "true"],
+    ["selfCompaction", null],
+    ["contextWarningPercent", 0],
+    ["contextWarningPercent", -1],
+    ["contextWarningPercent", 100],
+    ["contextWarningPercent", 101],
+    ["contextWarningPercent", "70"],
+    ["contextWarningPercent", Number.POSITIVE_INFINITY],
+    ["contextWarningPercent", Number.NaN],
   ];
 
   test.each(INVALID)(
@@ -97,5 +120,20 @@ describe("parseOptions", () => {
     });
     expect(settings).toEqual({ ...DEFAULT_SETTINGS, latch: false });
     expect(warnings).toHaveLength(2);
+  });
+
+  test("keeps context notices and self-compaction independently configurable", () => {
+    const { settings, warnings } = parse({
+      contextNotices: false,
+      selfCompaction: true,
+      contextWarningPercent: 82.5,
+    });
+    expect(settings).toEqual({
+      ...DEFAULT_SETTINGS,
+      contextNotices: false,
+      selfCompaction: true,
+      contextWarningPercent: 82.5,
+    });
+    expect(warnings).toEqual([]);
   });
 });

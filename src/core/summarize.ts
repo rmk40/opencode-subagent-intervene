@@ -225,7 +225,7 @@ function isActive(
 }
 
 /** The latest completed compaction and the assistant messages after it. */
-function sinceCompaction(messages: readonly SessionMessageInfo[]): {
+export function sinceCompaction(messages: readonly SessionMessageInfo[]): {
   readonly compaction?: CompletedCompaction;
   readonly assistants: AssistantMessage[];
 } {
