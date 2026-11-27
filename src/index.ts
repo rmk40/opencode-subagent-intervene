@@ -91,6 +91,11 @@ export interface Settings {
   readonly promptNoticeSeconds: number;
   /** How long a running subagent shows no progress before its parent is told; 0 turns that off. */
   readonly stallNoticeMinutes: number;
+  /**
+   * Offer the context tools and context notices at all. When false, `contextNotices`,
+   * `selfCompaction`, `contextWarningPercent` and `compactionBuffer` have no effect.
+   */
+  readonly contextTools: boolean;
   /** Admit durable context notices after successful local tools. */
   readonly contextNotices: boolean;
   /** Make the self-scoped compaction tool available. */
@@ -113,6 +118,7 @@ export const DEFAULT_SETTINGS: Settings = {
   promptNotices: true,
   promptNoticeSeconds: DEFAULT_NOTICE_DELAY_MS / SECOND_MS,
   stallNoticeMinutes: DEFAULT_STALL_NOTICE_MS / MINUTE_MS,
+  contextTools: true,
   contextNotices: true,
   selfCompaction: true,
   contextWarningPercent: DEFAULT_CONTEXT_WARNING_PERCENT,
@@ -132,6 +138,7 @@ export function parseOptions(
     promptNotices,
     promptNoticeSeconds,
     stallNoticeMinutes,
+    contextTools,
     contextNotices,
     selfCompaction,
     contextWarningPercent,
@@ -197,6 +204,10 @@ export function parseOptions(
           );
         }
         break;
+      case "contextTools":
+        if (typeof value === "boolean") contextTools = value;
+        else ignore(option, value, "a boolean");
+        break;
       case "contextNotices":
         if (typeof value === "boolean") contextNotices = value;
         else ignore(option, value, "a boolean");
@@ -236,6 +247,7 @@ export function parseOptions(
     promptNotices,
     promptNoticeSeconds,
     stallNoticeMinutes,
+    contextTools,
     contextNotices,
     selfCompaction,
     contextWarningPercent,
@@ -306,7 +318,7 @@ export default Plugin.define({
             { thresholdMs: settings.stallNoticeMinutes * MINUTE_MS },
           )
         : undefined;
-    const contextNotices = settings.contextNotices
+    const contextNotices = settings.contextTools && settings.contextNotices
       ? new ContextNotices(
           {
             reader: host.reader,
@@ -397,29 +409,31 @@ export default Plugin.define({
       }
       registrations.push(
         await ctx.tool.transform((editor) => {
-          editor.add(
-            contextStatusTool(
-              { reader: host.reader, models: host.models, logger },
-              {
-                warningPercent: settings.contextWarningPercent,
-                warningsEnabled: settings.contextNotices,
-                compactionBuffer: settings.compactionBuffer,
-              },
-            ),
-          );
-          editor.add(
-            contextNotesTool({
-              instructions: host.instructions,
-              clock: host.clock,
-            }),
-          );
-          if (settings.selfCompaction) {
+          if (settings.contextTools) {
             editor.add(
-              contextCompactTool({
-                compactor: host.compactor,
-                messenger: host.messenger,
+              contextStatusTool(
+                { reader: host.reader, models: host.models, logger },
+                {
+                  warningPercent: settings.contextWarningPercent,
+                  warningsEnabled: settings.contextNotices,
+                  compactionBuffer: settings.compactionBuffer,
+                },
+              ),
+            );
+            editor.add(
+              contextNotesTool({
+                instructions: host.instructions,
+                clock: host.clock,
               }),
             );
+            if (settings.selfCompaction) {
+              editor.add(
+                contextCompactTool({
+                  compactor: host.compactor,
+                  messenger: host.messenger,
+                }),
+              );
+            }
           }
           editor.namespace({
             name: NAMESPACE,

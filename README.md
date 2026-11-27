@@ -126,7 +126,8 @@ Close matches among the subagents you launched; check the ID before using one:
 The context tools operate only on the caller's session and have their own `context_status`,
 `context_notes` and `context_compact` permission keys. They do not require permission to launch
 subagents. Agents with a deny-all tool whitelist, including built-in `explore`, need explicit
-allow rules for these three keys.
+allow rules for these three keys. To use only the subagent tools, set the `contextTools` option to
+`false`, which removes the three context tools and the context notices.
 
 ### `subagent_stop`
 
@@ -624,8 +625,10 @@ Earlier copies can remain in the baseline, history or summaries.
 The entry persists across plugin reloads. If its stored format is unreadable, `read` and `save`
 report an error, and `clear` removes it.
 
-This tool remains available when `selfCompaction` or `contextNotices` is off. It is separate
-from the optional handoff supplied to `context_compact`.
+This tool remains available when `selfCompaction` or `contextNotices` is off, and is removed only
+when `contextTools` is off. Notes saved before that stay in their session's context, because
+OpenCode keeps the entry. To remove them, turn `contextTools` back on and call `clear`. The notes
+are separate from the optional handoff supplied to `context_compact`.
 
 ### `context_compact`
 
@@ -714,6 +717,7 @@ Options go in the object form of the plugin entry:
 | `promptNotices`         | `true`  | Tell the parent when a subagent is waiting on a permission prompt or a question                    |
 | `promptNoticeSeconds`   | `60`    | How long a prompt stays open before the parent is told, from `0` to `3600`                         |
 | `stallNoticeMinutes`    | `10`    | How long a running subagent shows no progress before the parent is told, up to `1440`; `0` is off  |
+| `contextTools`          | `true`  | Offer the context tools and context notices. With `false`, the four options below have no effect   |
 | `contextNotices`        | `true`  | Report context usage after successful tools at each reached milestone                              |
 | `selfCompaction`        | `true`  | Offer `context_compact` while keeping the status and notes tools available                         |
 | `contextWarningPercent` | `50`    | Set the starting percentage for context notices                                                    |
@@ -949,8 +953,8 @@ were called tasks and plugins use a different API.
 too. Check its `subagent` permission. A blanket allow rule in your config re-enables it for agents
 like `general` that deny it by default.
 
-If a context tool is missing, check its own permission key and the `selfCompaction` option for
-`context_compact`.
+If a context tool is missing, check its own permission key and the `contextTools` option. For
+`context_compact`, check the `selfCompaction` option too.
 
 **`subagents.list` returns `complete: false`.** The caller has more than 2000 subagents and their
 subagents. The first page covers 2000 sessions under the most recently updated subagents, which
